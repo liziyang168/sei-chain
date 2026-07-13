@@ -883,3 +883,28 @@ func TestReweightForNextEpoch_EmptyQueuesReturnsFalse(t *testing.T) {
 	// No votes in any queue; reweight should not signal quorum.
 	require.False(t, i.reweightForNextEpoch(trio))
 }
+
+func TestReweightForNextEpoch_RetainsPrevEpochLanes(t *testing.T) {
+	rng := utils.TestRng()
+	registry, _, _ := epoch.GenRegistry(rng, 4)
+
+	// trio0: Prev=nil, Current=epoch0, Next=epoch1
+	trio0 := utils.OrPanic1(registry.TrioAt(0))
+	i, err := newInner(trio0, utils.None[*loadedAvailState]())
+	require.NoError(t, err)
+
+	// Collect a lane from epoch0 (will become Prev after advance).
+	var epoch0Lane types.LaneID
+	for l := range trio0.Current.Committee().Lanes().All() {
+		epoch0Lane = l
+		break
+	}
+	require.Contains(t, i.blocks, epoch0Lane, "epoch0 lane missing before reweight")
+
+	// trio1: Prev=epoch0, Current=epoch1, Next=epoch2
+	trio1 := utils.OrPanic1(registry.TrioAt(epoch.EpochLength))
+	i.reweightForNextEpoch(trio1)
+
+	// Epoch0 lane is now in Prev — must be retained for boundary QC collection.
+	require.Contains(t, i.blocks, epoch0Lane, "Prev-epoch lane deleted prematurely; fullCommitQC needs it")
+}
