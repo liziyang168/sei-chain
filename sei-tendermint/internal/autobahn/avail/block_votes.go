@@ -5,7 +5,7 @@ import (
 )
 
 // laneVoteSet tracks weighted votes for a single block hash.
-// header is set on the first vote and never cleared by reweight, so callers
+// header is set on the first vote and never cleared by reset, so callers
 // can always recover the block header even after committee rotation empties votes.
 type laneVoteSet struct {
 	weight uint64
@@ -13,7 +13,7 @@ type laneVoteSet struct {
 	header *types.BlockHeader
 }
 
-func (s *laneVoteSet) reweight() {
+func (s *laneVoteSet) reset() {
 	s.weight = 0
 	s.votes = s.votes[:0]
 }
@@ -63,12 +63,12 @@ func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVot
 // newEpoch's committee. Called when the epoch advances so that votes from
 // validators who were in the next epoch are now counted. Returns true if any
 // block hash newly reached quorum under the new committee.
-// Each laneVoteSet.reweight() clears weight and votes but preserves header,
+// Each laneVoteSet.reset() clears weight and votes but preserves header,
 // so headers() can always recover block headers even after committee rotation.
 func (bv blockVotes) reweight(newEpoch *types.Epoch) bool {
 	c := newEpoch.Committee()
 	for _, set := range bv.byHash {
-		set.reweight()
+		set.reset()
 	}
 	quorumReached := false
 	for k, vote := range bv.byKey {

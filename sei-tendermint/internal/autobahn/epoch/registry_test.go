@@ -138,8 +138,8 @@ func TestTrioAt_GenesisEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TrioAt(0) error: %v", err)
 	}
-	if trio.Prev != nil {
-		t.Fatalf("TrioAt(0).Prev = %v, want nil for epoch 0", trio.Prev)
+	if trio.Prev.IsPresent() {
+		t.Fatalf("TrioAt(0).Prev = %v, want absent for epoch 0", trio.Prev)
 	}
 	if trio.Current == nil || trio.Current.EpochIndex() != 0 {
 		t.Fatalf("TrioAt(0).Current.EpochIndex() wrong, want 0")
@@ -151,12 +151,13 @@ func TestTrioAt_GenesisEpoch(t *testing.T) {
 
 func TestTrioAt_MiddleEpoch(t *testing.T) {
 	r, _ := makeRegistry(t)
-	// During seeding, TrioAt auto-generates any missing neighbor epochs.
+	// During seeding, EpochAt auto-generates missing epochs when TrioAt looks them up.
 	trio, err := r.TrioAt(2 * EpochLength)
 	if err != nil {
 		t.Fatalf("TrioAt(epoch 2) error: %v", err)
 	}
-	if trio.Prev == nil || trio.Prev.EpochIndex() != 1 {
+	prev, ok := trio.Prev.Get()
+	if !ok || prev.EpochIndex() != 1 {
 		t.Fatalf("TrioAt(epoch 2).Prev.EpochIndex() wrong, want 1")
 	}
 	if trio.Current == nil || trio.Current.EpochIndex() != 2 {

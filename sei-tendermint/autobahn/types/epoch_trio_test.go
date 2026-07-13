@@ -40,7 +40,7 @@ func TestEpochForRoad_HitsCurrentEpoch(t *testing.T) {
 
 func TestEpochForRoad_HitsPrevEpoch(t *testing.T) {
 	prev, current, next, _ := makeThreeEpochs(t)
-	w := types.EpochTrio{Prev: prev, Current: current, Next: next}
+	w := types.EpochTrio{Prev: utils.Some(prev), Current: current, Next: next}
 	ep, err := w.EpochForRoad(50)
 	if err != nil {
 		t.Fatalf("EpochForRoad(50): %v", err)
@@ -83,7 +83,8 @@ func TestEpochForRoad_OpenRangePrevDoesNotMaskCurrent(t *testing.T) {
 	committee := utils.OrPanic1(types.NewCommittee(weights))
 	openEpoch := types.NewEpoch(0, types.OpenRoadRange(), utils.GenTimestamp(rng), committee, 1)
 	current := types.NewEpoch(1, types.RoadRange{First: 100, Last: 199}, utils.GenTimestamp(rng), committee, 101)
-	w := types.EpochTrio{Prev: openEpoch, Current: current}
+	next := types.NewEpoch(2, types.RoadRange{First: 200, Last: 299}, utils.GenTimestamp(rng), committee, 201)
+	w := types.EpochTrio{Prev: utils.Some(openEpoch), Current: current, Next: next}
 	ep, err := w.EpochForRoad(150)
 	if err != nil {
 		t.Fatalf("EpochForRoad(150): %v", err)
@@ -94,12 +95,12 @@ func TestEpochForRoad_OpenRangePrevDoesNotMaskCurrent(t *testing.T) {
 	}
 }
 
-func TestEpochForRoad_NilPrevSkipped(t *testing.T) {
+func TestEpochForRoad_AbsentPrevSkipped(t *testing.T) {
 	_, current, next, _ := makeThreeEpochs(t)
-	w := types.EpochTrio{Prev: nil, Current: current, Next: next}
-	// Road 50 belongs to prev, which is nil — should return error, not panic.
+	w := types.EpochTrio{Current: current, Next: next}
+	// Road 50 belongs to prev, which is absent — should return error, not panic.
 	if _, err := w.EpochForRoad(50); err == nil {
-		t.Fatal("EpochForRoad(50) with nil Prev expected error, got nil")
+		t.Fatal("EpochForRoad(50) with absent Prev expected error, got nil")
 	}
 }
 
@@ -117,17 +118,6 @@ func TestCurrentAndNextLanes_UnionOfBoth(t *testing.T) {
 	for lane := range next.Committee().Lanes().All() {
 		if _, ok := lanes[lane]; !ok {
 			t.Fatalf("lane %v from Next missing from result", lane)
-		}
-	}
-}
-
-func TestCurrentAndNextLanes_NilNextOmitted(t *testing.T) {
-	_, current, _, _ := makeThreeEpochs(t)
-	w := types.EpochTrio{Current: current, Next: nil}
-	lanes := w.CurrentAndNextLanes()
-	for lane := range current.Committee().Lanes().All() {
-		if _, ok := lanes[lane]; !ok {
-			t.Fatalf("lane %v from Current missing from result", lane)
 		}
 	}
 }
@@ -175,7 +165,7 @@ func TestVerifyInWindow_NoneMatchReturnsError(t *testing.T) {
 
 func TestVerifyInWindow_SkipsPrev(t *testing.T) {
 	prev, current, next, _ := makeThreeEpochs(t)
-	w := types.EpochTrio{Prev: prev, Current: current, Next: next}
+	w := types.EpochTrio{Prev: utils.Some(prev), Current: current, Next: next}
 	callCount := 0
 	_, _ = w.VerifyInWindow(func(*types.Committee) error {
 		callCount++

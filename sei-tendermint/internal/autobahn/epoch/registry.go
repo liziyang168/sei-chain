@@ -136,8 +136,8 @@ func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
 }
 
 // TrioAt returns the EpochTrio centered on the epoch containing roadIndex.
-// During the seeding phase, missing epochs are auto-generated (same as EpochAt).
-// Returns an error if Current or Next is not in the registry after seeding.
+// Current and Next must already be present in the registry (callers seed them);
+// returns an error if either is missing. Prev is absent only when Current is epoch 0.
 func (r *Registry) TrioAt(roadIndex types.RoadIndex) (types.EpochTrio, error) {
 	centerIdx := types.EpochIndex(roadIndex / EpochLength)
 	current, err := r.EpochAt(types.RoadIndex(centerIdx) * EpochLength)
@@ -150,7 +150,9 @@ func (r *Registry) TrioAt(roadIndex types.RoadIndex) (types.EpochTrio, error) {
 	}
 	trio := types.EpochTrio{Current: current, Next: next}
 	if centerIdx > 0 {
-		trio.Prev, _ = r.EpochAt(types.RoadIndex(centerIdx-1) * EpochLength)
+		if prev, err := r.EpochAt(types.RoadIndex(centerIdx-1) * EpochLength); err == nil {
+			trio.Prev = utils.Some(prev)
+		}
 	}
 	return trio, nil
 }
