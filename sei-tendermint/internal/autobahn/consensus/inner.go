@@ -209,17 +209,16 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 		if i.View() != proposal.View() || i.TimeoutVote.IsPresent() || i.PrepareVote.IsPresent() {
 			return nil
 		}
-		// At the midpoint of epoch N, gate on epoch N+1 being seeded in the registry.
-		// The first AppQC in epoch N seeds N+1 via AdvanceIfNeeded, so this is
-		// trivially satisfied today (all epochs share the genesis committee).
-		// TODO: tighten to N+2 once AppQC carries the committee derived from the last
-		// block of epoch N — at that point N+2 won't be seeded until execution
-		// finalizes end(N), and this gate becomes meaningful back-pressure.
+		// At the midpoint of epoch N, gate on epoch N+2 being seeded in the registry.
+		// AdvanceIfNeeded seeds both N+1 and N+2 from each epoch-N AppQC, so the
+		// first AppQC of epoch N satisfies this gate immediately. The gate ensures
+		// that TrioAt(N.Last+1) — called at the epoch boundary in data and avail —
+		// always finds N+2 as Next without erroring.
 		if proposal.Proposal().Msg().Index() == i.epoch.RoadRange().MidPoint() {
-			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+1) * epoch.EpochLength); err != nil {
-				logger.Error("refusing PrepareVote: epoch N+1 not yet seeded at epoch midpoint",
+			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+2) * epoch.EpochLength); err != nil {
+				logger.Error("refusing PrepareVote: epoch N+2 not yet seeded at epoch midpoint",
 					"road", proposal.Proposal().Msg().Index(),
-					"missing", i.epoch.EpochIndex()+1)
+					"missing", i.epoch.EpochIndex()+2)
 				return nil
 			}
 		}

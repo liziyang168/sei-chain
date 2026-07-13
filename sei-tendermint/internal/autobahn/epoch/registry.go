@@ -102,20 +102,17 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 	return epoch, nil
 }
 
-// AdvanceIfNeeded ensures the epoch following appQC's epoch exists in the registry.
-// Creates the next epoch with the genesis committee if absent.
+// AdvanceIfNeeded ensures epochs N+1 and N+2 exist for an AppQC in epoch N.
+// Creates missing epochs with the genesis committee placeholder.
 //
-// Seeding model: an AppQC at road R (epoch N) seeds epoch N+1. Execution is
+// Seeding model: AppQC at road R (epoch N) seeds both N+1 and N+2. Execution is
 // downstream of CommitQC — AppQC for road R is produced only after CommitQC for
 // road R is finalized — so AppQC never runs ahead of consensus.
-// Consensus's midpoint liveness gate (consensus/inner.go) checks that epoch N+1
-// is present; since the first AppQC in epoch N seeds N+1 immediately, the gate
-// is trivially satisfied today. The gate will enforce a stricter N+2 check once
-// AppQC carries the committee derived from the last block of epoch N (future step).
 //
-// EpochLength is chosen large enough that this is always called before any
-// CommitQC for epoch N+1 reaches data.State — guaranteeing data can look up
-// the new epoch from the window without falling back to EpochAt.
+// Seeding two epochs ahead guarantees that by MidPoint(N), both N+1 and N+2 are
+// present. The midpoint liveness gate (consensus/inner.go) checks for N+2,
+// ensuring the epoch boundary TrioAt(N.Last+1) — which needs N+2 as Next — never
+// fails in the live path.
 //
 // TODO: real committee rotation — the next epoch's committee must be derived from
 // stake changes recorded in the blocks up to appQC. This requires the execution
@@ -123,10 +120,11 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 // wired, all epochs are created with the genesis committee as a placeholder.
 func (r *Registry) AdvanceIfNeeded(appQC *types.AppQC) {
 	currentIdx := types.EpochIndex(appQC.Proposal().RoadIndex() / EpochLength)
-	nextIdx := currentIdx + 1
 	for s := range r.state.Lock() {
-		if _, ok := s.m[nextIdx]; !ok {
-			_, _ = r.makeEpoch(s, nextIdx) //nolint:errcheck // genesis always present
+		for _, idx := range []types.EpochIndex{currentIdx + 1, currentIdx + 2} {
+			if _, ok := s.m[idx]; !ok {
+				_, _ = r.makeEpoch(s, idx) //nolint:errcheck // genesis always present
+			}
 		}
 		if currentIdx > s.latest {
 			s.latest = currentIdx
