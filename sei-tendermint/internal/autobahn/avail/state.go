@@ -291,12 +291,16 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return err
 		}
 	}
-	// epochTrio is updated atomically inside the lock at epoch boundaries, so
-	// this outside-lock read sees either the current epoch or the just-rotated
-	// one — both are valid for verifying a CommitQC at idx.
+	// Resolve the epoch that signed this QC. EpochForRoad searches the whole
+	// Prev/Current/Next window because the cached trio can lag by one across a
+	// boundary: a QC for the new epoch may arrive while Current is still the old
+	// one, or land in Prev just after a rotation — both verify correctly here.
+	// A road outside the window can only be below it (in-order processing via
+	// waitForCommitQC bounds how far ahead idx can be), i.e. a QC we already
+	// committed, so it is not needed — skip it like the stale case below.
 	ep, err := s.epochTrio.Load().EpochForRoad(idx)
 	if err != nil {
-		return fmt.Errorf("EpochForRoad(%d): %w", idx, err)
+		return nil
 	}
 	if err := qc.Verify(ep); err != nil {
 		return fmt.Errorf("qc.Verify(): %w", err)
