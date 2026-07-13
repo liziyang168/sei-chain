@@ -161,12 +161,12 @@ func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, trio types.EpochT
 	return nil, false
 }
 
-// reweightForNextEpoch initializes queues for any new lanes in nextTrio.Current and
+// reweightForNextEpoch initializes queues for any new lanes in nextTrio and
 // recalculates vote weights across all lanes using the new committee.
 // Returns true if any block newly reached quorum under the new committee.
 func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
 	activeLanes := nextTrio.CurrentAndNextLanes()
-	for lane := range nextTrio.Current.Committee().Lanes().All() {
+	for lane := range activeLanes {
 		if _, ok := i.blocks[lane]; !ok {
 			i.blocks[lane] = newQueue[types.BlockNumber, *types.Signed[*types.LaneProposal]]()
 		}
