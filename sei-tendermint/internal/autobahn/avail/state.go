@@ -306,8 +306,8 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return nil
 		}
 		// At an epoch boundary, initialize lanes for the next epoch.
-		// The next epoch must already be registered: AdvanceIfNeeded pre-generates
-		// it during epoch N, well before any CommitQC at the boundary. A miss here
+		// N+2 is seeded by executeBlock (AdvanceIfNeeded) on every block in epoch N,
+		// so it is present well before the boundary CommitQC arrives. A miss here
 		// is a registry bug — fail loudly rather than continuing with stale state.
 		if idx == s.epochTrio.Load().Current.RoadRange().Last {
 			nextTrio, err := s.data.Registry().TrioAt(idx + 1)
@@ -372,7 +372,6 @@ func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]
 		}
 		if updated {
 			ctrl.Updated()
-			s.data.Registry().AdvanceIfNeeded(appQC)
 		}
 	}
 	return nil
@@ -408,19 +407,14 @@ func (s *State) PushAppQC(appQC *types.AppQC, commitQC *types.CommitQC) error {
 	if !commitQC.GlobalRange().Has(appQC.Proposal().GlobalNumber()) {
 		return fmt.Errorf("appQC GlobalNumber not in commitQC range")
 	}
-	var accepted bool
 	for inner, ctrl := range s.inner.Lock() {
 		updated, err := inner.prune(appQC, commitQC)
 		if err != nil {
 			return err
 		}
 		if updated {
-			accepted = true
 			ctrl.Updated()
 		}
-	}
-	if accepted {
-		s.data.Registry().AdvanceIfNeeded(appQC)
 	}
 	return nil
 }

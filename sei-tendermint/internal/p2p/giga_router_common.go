@@ -268,6 +268,13 @@ func (r *gigaRouterCommon) executeBlock(ctx context.Context, b *atypes.GlobalBlo
 	if err := r.data.PushAppHash(ctx, b.GlobalNumber, resp.AppHash); err != nil {
 		return nil, fmt.Errorf("r.data.PushAppHash(%v): %w", b.GlobalNumber, err)
 	}
+	// Seed epoch N+2 in the registry. Both validators and full nodes execute
+	// blocks, so this is the single path that advances epoch seeding.
+	// When real committee rotation is implemented, the last block of epoch N will
+	// pass the derived committee for N+2 here instead of using the placeholder.
+	if appState, ok := b.FinalAppState.Get(); ok {
+		r.data.Registry().AdvanceIfNeeded(appState.RoadIndex())
+	}
 	return commitResp, nil
 }
 

@@ -65,19 +65,15 @@ func TestEpochAt_ErrorIfNotRegistered(t *testing.T) {
 
 func TestEpochAt_FoundAfterAdvanceIfNeeded(t *testing.T) {
 	r, _ := makeRegistry(t)
-	rng := utils.TestRng()
-	key := types.GenSecretKey(rng)
-	proposal := types.NewAppProposal(0, EpochLength-1, types.AppHash{}, types.EpochIndex(0))
-	appQC := types.NewAppQC([]*types.Signed[*types.AppVote]{
-		types.Sign(key, types.NewAppVote(proposal)),
-	})
-	r.AdvanceIfNeeded(appQC)
-	ep, err := r.EpochAt(EpochLength)
+	r.SealSeeding()
+	// Executing any block in epoch 0 seeds epoch 2 (N+2).
+	r.AdvanceIfNeeded(EpochLength - 1)
+	ep, err := r.EpochAt(2 * EpochLength)
 	if err != nil {
-		t.Fatalf("EpochAt(EpochLength) after AdvanceIfNeeded: %v", err)
+		t.Fatalf("EpochAt(2*EpochLength) after AdvanceIfNeeded: %v", err)
 	}
-	if ep.EpochIndex() != 1 {
-		t.Fatalf("EpochAt(EpochLength).EpochIndex() = %d, want 1", ep.EpochIndex())
+	if ep.EpochIndex() != 2 {
+		t.Fatalf("EpochAt(2*EpochLength).EpochIndex() = %d, want 2", ep.EpochIndex())
 	}
 }
 
@@ -103,17 +99,16 @@ func TestSeeding_DoesNotOverwriteExisting(t *testing.T) {
 	}
 }
 
-func TestAdvanceIfNeeded_AdvancesLatest(t *testing.T) {
+func TestAdvanceIfNeeded_SeedsNextNext(t *testing.T) {
 	r, _ := makeRegistry(t)
-	rng := utils.TestRng()
-	key := types.GenSecretKey(rng)
-	proposal := types.NewAppProposal(0, EpochLength-1, types.AppHash{}, types.EpochIndex(0))
-	appQC := types.NewAppQC([]*types.Signed[*types.AppVote]{
-		types.Sign(key, types.NewAppVote(proposal)),
-	})
-	r.AdvanceIfNeeded(appQC)
-	if latest := r.LatestEpoch().EpochIndex(); latest != 0 {
-		t.Fatalf("LatestEpoch().EpochIndex() = %d after AdvanceIfNeeded in epoch 0, want 0", latest)
+	r.SealSeeding()
+	// Epoch 0 execution seeds epoch 2, not epoch 1.
+	r.AdvanceIfNeeded(0)
+	if _, err := r.EpochAt(2 * EpochLength); err != nil {
+		t.Fatalf("EpochAt(epoch 2) after AdvanceIfNeeded(epoch 0): %v", err)
+	}
+	if _, err := r.EpochAt(EpochLength); err == nil {
+		t.Fatal("EpochAt(epoch 1) should not be seeded by AdvanceIfNeeded(epoch 0) after sealing")
 	}
 }
 

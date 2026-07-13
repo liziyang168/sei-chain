@@ -41,7 +41,7 @@ func NewRegistry(
 
 // SealSeeding marks the end of the initialization seeding phase. After this
 // call, EpochAt will no longer auto-generate missing epochs; new epochs can
-// only be created via AdvanceIfNeeded (driven by AppQC).
+// only be created via AdvanceIfNeeded (driven by block execution).
 //
 // Must be called once, after all layers (data, avail, consensus) have finished
 // their NewState initialization.
@@ -89,7 +89,7 @@ func (r *Registry) EpochAt(roadIndex types.RoadIndex) (*types.Epoch, error) {
 
 // makeEpoch constructs a new epoch at epochIdx using the genesis committee and
 // inserts it into s. Caller must hold the write lock.
-// Note: does NOT advance s.latest; that only happens on real epoch activation.
+// Note: does NOT advance s.latest.
 func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*types.Epoch, error) {
 	genesis, ok := s.m[0]
 	if !ok {
@@ -102,32 +102,22 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 	return epoch, nil
 }
 
-// AdvanceIfNeeded ensures epochs N+1 and N+2 exist for an AppQC in epoch N.
-// Creates missing epochs with the genesis committee placeholder.
+// AdvanceIfNeeded seeds epoch N+2 when a block in epoch N is executed.
+// Called by executeBlock (giga_router_common.go) on both validator and full-node paths.
 //
-// Seeding model: AppQC at road R (epoch N) seeds both N+1 and N+2. Execution is
-// downstream of CommitQC — AppQC for road R is produced only after CommitQC for
-// road R is finalized — so AppQC never runs ahead of consensus.
+// Seeding model: execution of any block in epoch N seeds epoch N+2 as a
+// placeholder (genesis committee). Epoch N+1 is seeded by executing epoch N-1
+// blocks (same rule applied one epoch earlier). The midpoint liveness gate
+// (consensus/inner.go) checks that N+2 is present before voting at MidPoint(N),
+// ensuring TrioAt(N.Last+1) — which needs N+2 as Next — always succeeds.
 //
-// Seeding two epochs ahead guarantees that by MidPoint(N), both N+1 and N+2 are
-// present. The midpoint liveness gate (consensus/inner.go) checks for N+2,
-// ensuring the epoch boundary TrioAt(N.Last+1) — which needs N+2 as Next — never
-// fails in the live path.
-//
-// TODO: real committee rotation — the next epoch's committee must be derived from
-// stake changes recorded in the blocks up to appQC. This requires the execution
-// layer to pass in the new committee alongside the AppQC. Until that bridge is
-// wired, all epochs are created with the genesis committee as a placeholder.
-func (r *Registry) AdvanceIfNeeded(appQC *types.AppQC) {
-	currentIdx := types.EpochIndex(appQC.Proposal().RoadIndex() / EpochLength)
+// TODO: real committee rotation — pass the derived committee for N+2 here once
+// the execution layer computes it from the last block of epoch N.
+func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
+	nextNextIdx := types.EpochIndex(roadIndex/EpochLength) + 2
 	for s := range r.state.Lock() {
-		for _, idx := range []types.EpochIndex{currentIdx + 1, currentIdx + 2} {
-			if _, ok := s.m[idx]; !ok {
-				_, _ = r.makeEpoch(s, idx) //nolint:errcheck // genesis always present
-			}
-		}
-		if currentIdx > s.latest {
-			s.latest = currentIdx
+		if _, ok := s.m[nextNextIdx]; !ok {
+			_, _ = r.makeEpoch(s, nextNextIdx) //nolint:errcheck // genesis always present
 		}
 	}
 }
