@@ -49,10 +49,12 @@ func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVot
 	if byHash.weight >= c.LaneQuorum() {
 		return nil, false
 	}
-	byHash.weight += c.Weight(k)
-	byHash.votes = append(byHash.votes, vote)
-	if byHash.weight >= c.LaneQuorum() {
-		return types.NewLaneQC(byHash.votes), true
+	if w := c.Weight(k); w != 0 {
+		byHash.weight += w
+		byHash.votes = append(byHash.votes, vote)
+		if byHash.weight >= c.LaneQuorum() {
+			return types.NewLaneQC(byHash.votes), true
+		}
 	}
 	return nil, false
 }
