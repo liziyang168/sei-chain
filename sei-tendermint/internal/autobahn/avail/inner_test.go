@@ -840,7 +840,7 @@ func TestNewInnerPruneAnchorCommitQCUsedForPrune(t *testing.T) {
 	require.Equal(t, types.RoadIndex(3), i.commitQCs.next)
 }
 
-func TestReweightForNextEpoch_AddsAndRemovesLanes(t *testing.T) {
+func TestAdvanceEpochLanes_AddsAndRemovesLanes(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 	trio := utils.OrPanic1(registry.TrioAt(0))
@@ -866,13 +866,13 @@ func TestReweightForNextEpoch_AddsAndRemovesLanes(t *testing.T) {
 	i.nextBlockToPersist[bogusLane] = 0
 	i.persistedBlockStart[bogusLane] = 0
 
-	// reweightForNextEpoch removes the bogus lane and keeps the real one.
-	i.reweightForNextEpoch(trio)
+	// advanceEpochLanes removes the bogus lane and keeps the real one.
+	i.advanceEpochLanes(trio)
 	require.NotContains(t, i.blocks, bogusLane, "decommissioned lane still present")
 	require.Contains(t, i.blocks, realLane, "active lane removed incorrectly")
 }
 
-func TestReweightForNextEpoch_EmptyQueuesReturnsFalse(t *testing.T) {
+func TestAdvanceEpochLanes_EmptyQueuesNoop(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 	trio := utils.OrPanic1(registry.TrioAt(0))
@@ -880,11 +880,15 @@ func TestReweightForNextEpoch_EmptyQueuesReturnsFalse(t *testing.T) {
 	i, err := newInner(trio, utils.None[*loadedAvailState]())
 	require.NoError(t, err)
 
-	// No votes in any queue; reweight should not signal quorum.
-	require.False(t, i.reweightForNextEpoch(trio))
+	// No votes in any queue; advancing to the same trio is a safe no-op that
+	// keeps the current lane set intact.
+	i.advanceEpochLanes(trio)
+	for lane := range trio.Current.Committee().Lanes().All() {
+		require.Contains(t, i.blocks, lane)
+	}
 }
 
-func TestReweightForNextEpoch_RetainsPrevEpochLanes(t *testing.T) {
+func TestAdvanceEpochLanes_RetainsPrevEpochLanes(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 
@@ -903,7 +907,7 @@ func TestReweightForNextEpoch_RetainsPrevEpochLanes(t *testing.T) {
 
 	// trio1: Prev=epoch0, Current=epoch1, Next=epoch2
 	trio1 := utils.OrPanic1(registry.TrioAt(epoch.EpochLength))
-	i.reweightForNextEpoch(trio1)
+	i.advanceEpochLanes(trio1)
 
 	// Epoch0 lane is now in Prev — must be retained for boundary QC collection.
 	require.Contains(t, i.blocks, epoch0Lane, "Prev-epoch lane deleted prematurely; fullCommitQC needs it")

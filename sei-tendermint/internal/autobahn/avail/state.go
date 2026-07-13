@@ -180,7 +180,7 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		if err != nil {
 			return nil, fmt.Errorf("TrioAt(%d): %w", inner.commitQCs.next, err)
 		}
-		inner.reweightForNextEpoch(nextTrio)
+		inner.advanceEpochLanes(nextTrio)
 		finalTrio = nextTrio
 	}
 
@@ -296,7 +296,7 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 	// one — both are valid for verifying a CommitQC at idx.
 	ep, err := s.epochTrio.Load().EpochForRoad(idx)
 	if err != nil {
-		return fmt.Errorf("EpochAt(%d): %w", idx, err)
+		return fmt.Errorf("EpochForRoad(%d): %w", idx, err)
 	}
 	if err := qc.Verify(ep); err != nil {
 		return fmt.Errorf("qc.Verify(): %w", err)
@@ -305,7 +305,7 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		if idx != inner.commitQCs.next {
 			return nil
 		}
-		// At an epoch boundary, initialize lanes for the next epoch.
+		// At an epoch boundary, rotate the lane set to the next epoch.
 		// N+2 is seeded by executeBlock (AdvanceIfNeeded) on every block in epoch N,
 		// so it is present well before the boundary CommitQC arrives. A miss here
 		// is a registry bug — fail loudly rather than continuing with stale state.
@@ -314,11 +314,14 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			if err != nil {
 				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
 			}
-			quorumReached := inner.reweightForNextEpoch(nextTrio)
+			inner.advanceEpochLanes(nextTrio)
 			s.epochTrio.Store(&nextTrio)
-			if quorumReached {
-				ctrl.Updated()
-			}
+			// The trailing ctrl.Updated() below is the ONLY wake that surfaces
+			// laneQCs already at quorum in the incoming Current (old Next) epoch:
+			// pushVote credited those votes silently (it notifies only for the
+			// then-current epoch), so WaitForLaneQCs must be woken here to re-scan
+			// laneQC under the just-stored trio. Do not make it conditional or the
+			// boundary stalls.
 		}
 		inner.commitQCs.pushBack(qc)
 		metrics.ObserveCommitQC(qc)
@@ -336,7 +339,7 @@ func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]
 	idx := v.Msg().Proposal().RoadIndex()
 	ep, err := s.epochTrio.Load().EpochForRoad(idx)
 	if err != nil {
-		return fmt.Errorf("EpochAt(%d): %w", idx, err)
+		return fmt.Errorf("EpochForRoad(%d): %w", idx, err)
 	}
 	committee := ep.Committee()
 	if err := v.VerifySig(committee); err != nil {
@@ -388,7 +391,7 @@ func (s *State) PushAppQC(appQC *types.AppQC, commitQC *types.CommitQC) error {
 	}
 	ep, err := s.epochTrio.Load().EpochForRoad(commitQC.Proposal().Index())
 	if err != nil {
-		return fmt.Errorf("EpochAt(%d): %w", commitQC.Proposal().Index(), err)
+		return fmt.Errorf("EpochForRoad(%d): %w", commitQC.Proposal().Index(), err)
 	}
 	if err := appQC.Verify(ep.Committee()); err != nil {
 		return fmt.Errorf("appQC.Verify(): %w", err)
@@ -533,10 +536,12 @@ func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote
 		for q.next <= h.BlockNumber() {
 			q.pushBack(newBlockVotes())
 		}
-		// pushVote accumulates weight using the current epoch's committee.
-		// Votes from next-epoch validators are stored (byKey) but contribute
-		// zero weight until reweightForNextEpoch runs at the epoch boundary.
-		if _, ok := q.q[h.BlockNumber()].pushVote(s.epochTrio.Load().Current, vote); ok {
+		// pushVote accumulates weight per epoch: a vote counts toward every epoch
+		// in the window under which its signer has weight. Passing Current and
+		// Next means a next-epoch validator's vote is counted for the next epoch
+		// immediately, so no reweight is needed when the epoch advances.
+		trio := s.epochTrio.Load()
+		if q.q[h.BlockNumber()].pushVote([]*types.Epoch{trio.Current, trio.Next}, vote) {
 			ctrl.Updated()
 		}
 	}
@@ -560,12 +565,22 @@ func (s *State) headers(ctx context.Context, lr *types.LaneRange) ([]*types.Bloc
 				if q.first > lr.First() {
 					return nil, data.ErrPruned
 				}
-				// Check if we have the header.
-				if entry, ok := q.q[n].byHash[want]; ok {
-					h := entry.header
-					want = h.ParentHash()
-					headers[len(headers)-i-1] = h
-					break
+				// Check if we have the header. Every per-epoch set for a hash
+				// is non-empty, and all its votes carry that hash's header, so
+				// votes[0] of any set recovers it.
+				if byEpoch, ok := q.q[n].byHash[want]; ok {
+					var h *types.BlockHeader
+					for _, set := range byEpoch {
+						if len(set.votes) > 0 {
+							h = set.votes[0].Msg().Header()
+							break
+						}
+					}
+					if h != nil {
+						want = h.ParentHash()
+						headers[len(headers)-i-1] = h
+						break
+					}
 				}
 				// Otherwise, wait.
 				if err := ctrl.Wait(ctx); err != nil {
@@ -587,7 +602,10 @@ func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.Ful
 	var commitHeaders []*types.BlockHeader
 	ep, err := s.epochTrio.Load().EpochForRoad(qc.Proposal().Index())
 	if err != nil {
-		return nil, fmt.Errorf("EpochAt(%d): %w", qc.Proposal().Index(), err)
+		// The epoch window can advance twice between CommitQC() returning and this
+		// lookup, dropping this QC's road below the window. Its blocks are then
+		// below the prune cursor, so treat it as pruned (the caller skips pruned QCs).
+		return nil, fmt.Errorf("epoch window advanced past road %d: %w", qc.Proposal().Index(), data.ErrPruned)
 	}
 	for lane := range ep.Committee().Lanes().All() {
 		headers, err := s.headers(ctx, qc.LaneRange(lane))

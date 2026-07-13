@@ -118,18 +118,29 @@ func newInner(data utils.Option[*pb.PersistedInner], registry *epoch.Registry) (
 		persisted = *decoded
 	}
 
+	// The runtime epoch is the current view's epoch (NextIndexOpt(CommitQC)):
+	// View() must stamp the next view with the epoch it belongs to. But the
+	// persisted CommitQC must be verified against its own epoch, which differs
+	// from the view epoch when the CommitQC is on the last road of an epoch.
 	nextViewRoad := types.NextIndexOpt(persisted.CommitQC)
-	startEpoch, err := registry.EpochAt(nextViewRoad)
+	viewEpoch, err := registry.EpochAt(nextViewRoad)
 	if err != nil {
 		return inner{}, fmt.Errorf("EpochAt(%d): %w", nextViewRoad, err)
 	}
-	if err := persisted.validate(startEpoch); err != nil {
+	commitEpoch := viewEpoch
+	if cqc, ok := persisted.CommitQC.Get(); ok {
+		commitEpoch, err = registry.EpochAt(cqc.Proposal().Index())
+		if err != nil {
+			return inner{}, fmt.Errorf("EpochAt(%d): %w", cqc.Proposal().Index(), err)
+		}
+	}
+	if err := persisted.validate(commitEpoch, viewEpoch); err != nil {
 		return inner{}, err
 	}
 
 	logger.Info("restored consensus state", "state", innerProtoConv.Encode(&persisted))
 
-	return inner{persistedInner: persisted, registry: registry, epoch: startEpoch}, nil
+	return inner{persistedInner: persisted, registry: registry, epoch: viewEpoch}, nil
 }
 
 func (s *State) pushCommitQC(qc *types.CommitQC) error {

@@ -115,7 +115,7 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 
 	// Restore persisted blocks. Create queues on demand for any lane present
 	// in the WAL — lanes outside the current epoch will be pruned by
-	// reweightForNextEpoch in NewState if a boundary was crossed.
+	// advanceEpochLanes in NewState if a boundary was crossed.
 	for lane, bs := range l.blocks {
 		if len(bs) == 0 {
 			continue
@@ -152,19 +152,26 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 }
 
 func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, trio types.EpochTrio) (*types.LaneQC, bool) {
-	quorum := trio.Current.Committee().LaneQuorum()
-	for _, byHash := range i.votes[lane].q[n].byHash {
-		if byHash.weight >= quorum {
-			return types.NewLaneQC(byHash.votes), true
+	c := trio.Current.Committee()
+	quorum := c.LaneQuorum()
+	epIdx := trio.Current.EpochIndex()
+	for _, byEpoch := range i.votes[lane].q[n].byHash {
+		if set, ok := byEpoch[epIdx]; ok && set.weight >= quorum {
+			return types.NewLaneQC(set.votes), true
 		}
 	}
 	return nil, false
 }
 
-// reweightForNextEpoch initializes queues for any new lanes in nextTrio and
-// recalculates vote weights across all lanes using the new committee.
-// Returns true if any block newly reached quorum under the new committee.
-func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
+// advanceEpochLanes rotates the lane set for a crossing into nextTrio: it
+// creates queues for lanes newly introduced by the next epoch, drops lanes no
+// longer in the window, and back-fills the newly-entering Next epoch's vote
+// sets. pushVote credits each vote to the Current and Next epochs only, so when
+// nextTrio.Next first enters the window its sets are empty; applyEpoch seeds
+// them from stored votes so a block that finalizes under it (a lagging lane, or
+// an identical committee) still reaches quorum. The prior Current/Next sets
+// were already filled by pushVote, so they need no adjustment.
+func (i *inner) advanceEpochLanes(nextTrio types.EpochTrio) {
 	activeLanes := nextTrio.CurrentAndNextLanes()
 	for lane := range activeLanes {
 		if _, ok := i.blocks[lane]; !ok {
@@ -181,7 +188,7 @@ func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
 		}
 	}
 	// Retain Prev-epoch lanes in the deletion guard: fullCommitQC may still be
-	// collecting headers from the boundary QC that triggered this reweight, and
+	// collecting headers from the boundary QC that triggered this advance, and
 	// it accesses lane queues by epoch N's committee. Prev lanes are cleaned up
 	// naturally on the next epoch advance when they fall outside AllLanes().
 	retainLanes := nextTrio.AllLanes()
@@ -193,15 +200,12 @@ func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
 			delete(i.persistedBlockStart, lane)
 		}
 	}
-	quorumReached := false
+	// Seed the newly-entering Next epoch's vote sets from votes already stored.
 	for _, voteQueue := range i.votes {
 		for n := voteQueue.first; n < voteQueue.next; n++ {
-			if voteQueue.q[n].reweight(nextTrio.Current) {
-				quorumReached = true
-			}
+			voteQueue.q[n].applyEpoch(nextTrio.Next)
 		}
 	}
-	return quorumReached
 }
 
 // prune advances the state to account for a new AppQC/CommitQC pair.

@@ -8,7 +8,6 @@ import (
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/producer"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/p2p/giga"
-	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/p2p/rpc"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils/scope"
 )
@@ -22,20 +21,15 @@ func NewGigaFullnodeRouter(cfg *GigaRouterCommonConfig, key NodeSecretKey) (*gig
 	if err != nil {
 		return nil, err
 	}
+	// Seal seeding once all layers are constructed. On a fullnode data.State is
+	// the only seeding consumer (no avail/consensus layer), so this is the last
+	// point that needs the registry to auto-generate WAL-replay epochs. On the
+	// validator path the equivalent seal lives in consensus.NewState, which
+	// constructs the final (avail) layer.
 	dataState.Registry().SealSeeding()
 	logger.Info("GigaRouter initialized (fullnode)", "validators", len(cfg.ValidatorAddrs), "dial_interval", cfg.DialInterval, "inbound_fullnode_cap", cfg.MaxInboundFullnodePeers)
 	return &gigaFullnodeRouter{
-		gigaRouterCommon: &gigaRouterCommon{
-			cfg:                cfg,
-			key:                key,
-			data:               dataState,
-			epochTrio:          dataState.EpochTrio(),
-			service:            giga.NewBlockSyncService(dataState),
-			poolIn:             giga.NewPool[NodePublicKey, rpc.Server[giga.API]](),
-			poolOut:            giga.NewPool[NodePublicKey, rpc.Client[giga.API]](),
-			app:                cfg.App,
-			inboundFullnodeCap: int64(cfg.MaxInboundFullnodePeers),
-		},
+		gigaRouterCommon: newGigaRouterCommon(cfg, key, dataState, giga.NewBlockSyncService(dataState)),
 	}, nil
 }
 

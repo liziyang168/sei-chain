@@ -9,97 +9,132 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPushVote_ZeroWeightSignerExcludedFromQC verifies that a signer with
-// zero weight in the current epoch (e.g. a next-epoch-only validator whose
-// vote was accepted via VerifyInWindow) is stored in byKey but does NOT
-// appear in byHash.votes or the resulting LaneQC. Including such a signature
-// would cause laneQC.Verify to fail on peers when they check all sigs against
-// the current committee.
-func TestPushVote_ZeroWeightSignerExcludedFromQC(t *testing.T) {
-	rng := utils.TestRng()
-
-	keyA := types.GenSecretKey(rng) // in current epoch
-	keyE := types.GenSecretKey(rng) // next-epoch-only (weight=0 in current)
-
-	makeEpoch := func(idx types.EpochIndex, weights map[types.PublicKey]uint64) *types.Epoch {
-		c := utils.OrPanic1(types.NewCommittee(weights))
-		first := types.RoadIndex(uint64(idx) * 108_000)
-		rr := types.RoadRange{First: first, Last: first + 107_999}
-		return types.NewEpoch(idx, rr, time.Time{}, c, 0)
-	}
-
-	ep0 := makeEpoch(0, map[types.PublicKey]uint64{keyA.Public(): 1})
-
-	lane := keyA.Public()
-	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
-	header := block.Header()
-
-	bv := newBlockVotes()
-
-	// E votes first; weight=0 in ep0 so must not appear in byHash.votes.
-	lqc, ok := bv.pushVote(ep0, types.Sign(keyE, types.NewLaneVote(header)))
-	require.Nil(t, lqc)
-	require.False(t, ok)
-	require.Contains(t, bv.byKey, keyE.Public(), "E's vote must be stored in byKey for future reweight")
-	entry := bv.byHash[header.Hash()]
-	require.Empty(t, entry.votes, "E's zero-weight vote must not appear in byHash.votes")
-
-	// A votes and reaches quorum; the resulting LaneQC must contain only A.
-	lqc, ok = bv.pushVote(ep0, types.Sign(keyA, types.NewLaneVote(header)))
-	require.NotNil(t, lqc)
-	require.True(t, ok)
-	entry = bv.byHash[header.Hash()]
-	require.Len(t, entry.votes, 1, "only A's vote should be in byHash.votes")
-	require.Equal(t, keyA.Public(), entry.votes[0].Key(), "the sole vote must be A's")
+func makeVoteEpoch(idx types.EpochIndex, weights map[types.PublicKey]uint64) *types.Epoch {
+	c := utils.OrPanic1(types.NewCommittee(weights))
+	first := types.RoadIndex(uint64(idx) * 108_000)
+	rr := types.RoadRange{First: first, Last: first + 107_999}
+	return types.NewEpoch(idx, rr, time.Time{}, c, 0)
 }
 
-// TestReweightPreservesHeader verifies that after reweight empties the votes
-// slice (because committee rotation removed all voters for a block hash), the
-// block header stored at first-vote time is still accessible. This matters
-// because headers() reads entry.header to build the parent-hash chain for
-// fullCommitQC, and that call arrives after reweightForNextEpoch has run.
-func TestReweightPreservesHeader(t *testing.T) {
+// TestPushVote_AccumulatesPerEpoch verifies that a vote is credited only to the
+// epochs under which its signer has weight, each tracked in its own laneVoteSet.
+// A next-epoch-only signer contributes to the next epoch's set but leaves the
+// current epoch's set untouched, so no reweight is needed at the boundary.
+func TestPushVote_AccumulatesPerEpoch(t *testing.T) {
 	rng := utils.TestRng()
 
-	// Epoch 0: key A only. Epoch 1: key B only (disjoint committees).
-	// LaneQuorum for a 1-validator committee is 1, so A's vote alone reaches quorum.
-	// After reweight to ep1, A's vote is cleared from votes — but header must survive.
+	keyA := types.GenSecretKey(rng) // current epoch only
+	keyE := types.GenSecretKey(rng) // next epoch only
+
+	ep0 := makeVoteEpoch(0, map[types.PublicKey]uint64{keyA.Public(): 1})
+	ep1 := makeVoteEpoch(1, map[types.PublicKey]uint64{keyE.Public(): 1})
+	eps := []*types.Epoch{ep0, ep1}
+
+	lane := keyA.Public()
+	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
+	header := block.Header()
+	h := header.Hash()
+
+	bv := newBlockVotes()
+
+	// E votes first: weight 0 in ep0, 1 in ep1 (ep1 LaneQuorum == 1). E reaches
+	// the next epoch's quorum but NOT the current epoch's, so pushVote reports
+	// nothing — WaitForLaneQCs only cares about the current epoch.
+	require.False(t, bv.pushVote(eps, types.Sign(keyE, types.NewLaneVote(header))),
+		"a next-epoch-only quorum must not notify")
+	require.Contains(t, bv.byKey, keyE.Public())
+
+	byEpoch := bv.byHash[h]
+	_, inEp0 := byEpoch[0]
+	require.False(t, inEp0, "E has no weight in ep0; the ep0 set must not be created")
+	set1 := byEpoch[1]
+	require.NotNil(t, set1)
+	require.Len(t, set1.votes, 1, "E's vote is credited to ep1 only")
+	require.Equal(t, keyE.Public(), set1.votes[0].Key())
+	// The block header is recoverable from any set's votes[0] (no dedicated field).
+	require.Equal(t, header, set1.votes[0].Msg().Header())
+
+	// A votes: weight 1 in ep0, 0 in ep1. Reaches the ep0 quorum → notifies.
+	require.True(t, bv.pushVote(eps, types.Sign(keyA, types.NewLaneVote(header))))
+	set0 := byEpoch[0]
+	require.NotNil(t, set0)
+	require.Len(t, set0.votes, 1, "only A's vote is in the ep0 set")
+	require.Equal(t, keyA.Public(), set0.votes[0].Key())
+	require.Len(t, set1.votes, 1, "A's vote does not leak into the ep1 set")
+}
+
+// TestApplyEpoch_BackfillsFromStoredVotes verifies that when an epoch newly
+// enters the window, its set is seeded from votes that arrived before it was in
+// range. This covers a block voted while Current=N but finalized under N+2 with
+// an identical committee: without back-fill its N+2 set would be empty.
+func TestApplyEpoch_BackfillsFromStoredVotes(t *testing.T) {
+	rng := utils.TestRng()
 	keyA := types.GenSecretKey(rng)
 	keyB := types.GenSecretKey(rng)
-
-	makeEpoch := func(idx types.EpochIndex, weights map[types.PublicKey]uint64) *types.Epoch {
-		c := utils.OrPanic1(types.NewCommittee(weights))
-		first := types.RoadIndex(uint64(idx) * 108_000)
-		rr := types.RoadRange{First: first, Last: first + 107_999}
-		return types.NewEpoch(idx, rr, time.Time{}, c, 0)
+	keyC := types.GenSecretKey(rng)
+	keyD := types.GenSecretKey(rng)
+	weights := map[types.PublicKey]uint64{
+		keyA.Public(): 1, keyB.Public(): 1, keyC.Public(): 1, keyD.Public(): 1,
 	}
+	// ep0=current, ep1=next at push time; ep2 shares the same committee.
+	ep0 := makeVoteEpoch(0, weights)
+	ep1 := makeVoteEpoch(1, weights)
+	ep2 := makeVoteEpoch(2, weights)
 
-	ep0 := makeEpoch(0, map[types.PublicKey]uint64{keyA.Public(): 1})
-	ep1 := makeEpoch(1, map[types.PublicKey]uint64{keyB.Public(): 1})
+	lane := keyA.Public()
+	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
+	header := block.Header()
+	h := header.Hash()
+
+	bv := newBlockVotes()
+	// A votes while the window is {ep0, ep1}: credited to ep0 and ep1 only.
+	bv.pushVote([]*types.Epoch{ep0, ep1}, types.Sign(keyA, types.NewLaneVote(header)))
+	_, hasEp2 := bv.byHash[h][2]
+	require.False(t, hasEp2, "ep2 not credited at push time")
+
+	// ep2 enters the window as Next → back-fill from stored votes.
+	bv.applyEpoch(ep2)
+	set2 := bv.byHash[h][2]
+	require.NotNil(t, set2, "ep2 set seeded on entry")
+	require.Len(t, set2.votes, 1)
+	require.Equal(t, keyA.Public(), set2.votes[0].Key())
+	require.Equal(t, uint64(1), set2.weight)
+
+	// Idempotency guard within a single entry: a later signer arriving via
+	// pushVote (window now {ep1, ep2}) adds to ep2 without disturbing A's credit.
+	bv.pushVote([]*types.Epoch{ep1, ep2}, types.Sign(keyB, types.NewLaneVote(header)))
+	require.Len(t, set2.votes, 2, "B added to ep2 after entry")
+}
+
+// TestPushVote_DedupsSigner verifies a signer's second vote for the same block
+// is ignored (byKey dedup), so weight is never double-counted.
+func TestPushVote_DedupsSigner(t *testing.T) {
+	rng := utils.TestRng()
+	keyA := types.GenSecretKey(rng)
+	// Four validators (LaneQuorum = Faulty()+1 = 2) so a single vote is below
+	// quorum and the effect of a duplicate is observable.
+	keyB := types.GenSecretKey(rng)
+	keyC := types.GenSecretKey(rng)
+	keyD := types.GenSecretKey(rng)
+	weights := map[types.PublicKey]uint64{
+		keyA.Public(): 1, keyB.Public(): 1, keyC.Public(): 1, keyD.Public(): 1,
+	}
+	// Distinct current/next epochs (as in production) with the same committee.
+	eps := []*types.Epoch{makeVoteEpoch(0, weights), makeVoteEpoch(1, weights)}
 
 	lane := keyA.Public()
 	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
 	header := block.Header()
 
 	bv := newBlockVotes()
+	vote := types.Sign(keyA, types.NewLaneVote(header))
 
-	// A's vote reaches quorum immediately (LaneQuorum=1).
-	lqc, ok := bv.pushVote(ep0, types.Sign(keyA, types.NewLaneVote(header)))
-	require.NotNil(t, lqc, "quorum should be reached on A's vote")
-	require.True(t, ok)
+	require.False(t, bv.pushVote(eps, vote), "one of four validators is below quorum (2)")
+	set := bv.byHash[header.Hash()][0]
+	require.Equal(t, uint64(1), set.weight)
 
-	h := header.Hash()
-	entry := bv.byHash[h]
-	require.NotNil(t, entry.header, "header should be set after pushVote")
-	require.Equal(t, header, entry.header)
-	require.Len(t, entry.votes, 1)
-
-	// Reweight to epoch 1: keyA and keyB have weight 0, so votes is emptied.
-	bv.reweight(ep1)
-
-	entry = bv.byHash[h]
-	require.Empty(t, entry.votes, "votes should be empty after reweight removes old-committee voters")
-	require.Equal(t, uint64(0), entry.weight)
-	require.NotNil(t, entry.header, "header must survive reweight")
-	require.Equal(t, header, entry.header, "header content must be unchanged after reweight")
+	// Re-pushing A's vote must not add weight again.
+	require.False(t, bv.pushVote(eps, vote))
+	require.Equal(t, uint64(1), set.weight, "duplicate vote must not double-count")
+	require.Len(t, set.votes, 1)
 }

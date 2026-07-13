@@ -10,7 +10,6 @@ import (
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/consensus"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/producer"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/p2p/giga"
-	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/p2p/rpc"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils/scope"
 )
@@ -41,20 +40,10 @@ func NewGigaValidatorRouter(cfg *GigaValidatorConfig, key NodeSecretKey) (*gigaV
 	producerState := producer.NewState(cfg.Producer, consensusState, cfg.App)
 	logger.Info("GigaRouter initialized (validator)", "validators", len(cfg.ValidatorAddrs), "dial_interval", cfg.DialInterval, "inbound_fullnode_cap", cfg.MaxInboundFullnodePeers)
 	return &gigaValidatorRouter{
-		gigaRouterCommon: &gigaRouterCommon{
-			cfg:                &cfg.GigaRouterCommonConfig,
-			key:                key,
-			data:               dataState,
-			epochTrio:          dataState.EpochTrio(),
-			service:            giga.NewService(consensusState),
-			poolIn:             giga.NewPool[NodePublicKey, rpc.Server[giga.API]](),
-			poolOut:            giga.NewPool[NodePublicKey, rpc.Client[giga.API]](),
-			app:                cfg.App,
-			inboundFullnodeCap: int64(cfg.MaxInboundFullnodePeers),
-		},
-		consensus:    consensusState,
-		producer:     producerState,
-		validatorKey: cfg.ValidatorKey.Public(),
+		gigaRouterCommon: newGigaRouterCommon(&cfg.GigaRouterCommonConfig, key, dataState, giga.NewService(consensusState)),
+		consensus:        consensusState,
+		producer:         producerState,
+		validatorKey:     cfg.ValidatorKey.Public(),
 	}, nil
 }
 
@@ -90,7 +79,7 @@ func (r *gigaValidatorRouter) Run(ctx context.Context) error {
 // EvmProxy on the validator returns None when the sender's shard owner is
 // us (handle locally via mempool, no HTTP round-trip to self).
 func (r *gigaValidatorRouter) EvmProxy(sender common.Address) utils.Option[*url.URL] {
-	shardValidator := r.epochTrio.Load().Current.Committee().EvmShard(sender)
+	shardValidator := r.data.EpochTrio().Current.Committee().EvmShard(sender)
 	if r.validatorKey == shardValidator {
 		return utils.None[*url.URL]()
 	}

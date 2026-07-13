@@ -375,9 +375,10 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 // Registry returns the epoch registry.
 func (s *State) Registry() *epoch.Registry { return s.cfg.Registry }
 
-// EpochTrio returns the atomic pointer to the current epoch window.
-// Callers may read it directly (e.g. EvmProxy) without going through State.
-func (s *State) EpochTrio() *atomic.Pointer[types.EpochTrio] { return &s.epochTrio }
+// EpochTrio returns a snapshot of the current epoch window. Returned by value
+// so callers (e.g. EvmProxy) get an immutable point-in-time view; they must
+// call again to observe a boundary advance rather than caching the result.
+func (s *State) EpochTrio() types.EpochTrio { return *s.epochTrio.Load() }
 
 // PushQC pushes FullCommitQC and a subset of blocks that were finalized by it.
 // Pushing the qc and blocks is atomic, so that no unnecessary GetBlock RPCs are issued.
