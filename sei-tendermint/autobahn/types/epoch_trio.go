@@ -40,6 +40,21 @@ func (w EpochTrio) CurrentAndNextLanes() map[LaneID]struct{} {
 	return lanes
 }
 
+// AllLanes returns the union of lanes across all three epochs (Prev, Current, Next).
+// Used when decommissioning lanes: Prev-epoch lanes must be retained until any
+// boundary QC that spans the epoch transition has been fully collected.
+func (w EpochTrio) AllLanes() map[LaneID]struct{} {
+	lanes := make(map[LaneID]struct{})
+	for _, ep := range w.all() {
+		if ep != nil {
+			for lane := range ep.Committee().Lanes().All() {
+				lanes[lane] = struct{}{}
+			}
+		}
+	}
+	return lanes
+}
+
 // VerifyInWindow calls fn against Current and Next only, skipping Prev.
 // Use for votes and blocks, which must belong to the current or upcoming epoch.
 func (w EpochTrio) VerifyInWindow(fn func(*Committee) error) (*Epoch, error) {

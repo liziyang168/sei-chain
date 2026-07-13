@@ -180,8 +180,13 @@ func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
 			i.persistedBlockStart[lane] = 0
 		}
 	}
+	// Retain Prev-epoch lanes in the deletion guard: fullCommitQC may still be
+	// collecting headers from the boundary QC that triggered this reweight, and
+	// it accesses lane queues by epoch N's committee. Prev lanes are cleaned up
+	// naturally on the next epoch advance when they fall outside AllLanes().
+	retainLanes := nextTrio.AllLanes()
 	for lane := range i.blocks {
-		if _, ok := activeLanes[lane]; !ok {
+		if _, ok := retainLanes[lane]; !ok {
 			delete(i.blocks, lane)
 			delete(i.votes, lane)
 			delete(i.nextBlockToPersist, lane)
