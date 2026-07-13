@@ -3,11 +3,27 @@ package keeper
 import (
 	"fmt"
 
+	"golang.org/x/mod/semver"
+
 	sdk "github.com/sei-protocol/sei-chain/sei-cosmos/types"
 	"github.com/sei-protocol/sei-chain/sei-cosmos/x/distribution/types"
 	stakingtypes "github.com/sei-protocol/sei-chain/sei-cosmos/x/staking/types"
 	"github.com/sei-protocol/seilog"
 )
+
+// ReadOnlyRewardsUpgrade is the upgrade at which delegation-reward queries stopped
+// persisting a validator-period increment (see DelegationRewardsForQuery).
+//
+// It MUST byte-for-byte equal the upgrade name registered for that release in
+// app/tags. The live gate resolves activation via an exact-string done-marker
+// lookup (UpgradeKeeper.GetDoneHeight), while the tracing gate uses semver
+// comparison — which treats "v6.7" and "v6.7.0" as equal. If this constant and the
+// registered tag are only semver-equal but not identical, the live/sync path and
+// the tracing path disagree for a block in that upgrade, which is the exact
+// trace/replay divergence this gate exists to prevent. Recent tags drop the patch
+// component (…, v6.5, v6.6), so this is "v6.7", not "v6.7.0". The invariant is
+// guarded by app.TestReadOnlyRewardsUpgradeGateReconciled.
+const ReadOnlyRewardsUpgrade = "v6.7"
 
 var logger = seilog.NewLogger("cosmos", "x", "distribution", "keeper")
 
@@ -104,6 +120,43 @@ func (k Keeper) currentRewardsEndingPeriodAndRatio(ctx sdk.Context, val stakingt
 func (k Keeper) CalculateDelegationRewardsReadOnly(ctx sdk.Context, val stakingtypes.ValidatorI, del stakingtypes.DelegationI) sdk.DecCoins {
 	endingPeriod, endingRatio := k.currentRewardsEndingPeriodAndRatio(ctx, val)
 	return k.calculateDelegationRewards(ctx, val, del, endingPeriod, &endingRatio)
+}
+
+// DelegationRewardsForQuery computes a delegation's rewards for a read-only reward
+// query. From v6.7 it uses the non-mutating read-only path
+// (CalculateDelegationRewardsReadOnly). Before v6.7 these queries persisted a
+// validator-period increment (IncrementValidatorPeriod), which committed when the
+// EVM distribution `rewards()` precompile ran the query on the live context. To
+// keep historical re-execution deterministic, reproduce that mutating behavior for
+// any pre-v6.7 block — whether it is being re-traced or replayed block-by-block
+// during sync (see rewardQueryIsReadOnly).
+func (k Keeper) DelegationRewardsForQuery(ctx sdk.Context, val stakingtypes.ValidatorI, del stakingtypes.DelegationI) sdk.DecCoins {
+	if k.rewardQueryIsReadOnly(ctx) {
+		return k.CalculateDelegationRewardsReadOnly(ctx, val, del)
+	}
+	// Pre-v6.7 behavior: the query incremented the validator period and read the
+	// freshly-persisted ending ratio. Reproduce it exactly for deterministic replay.
+	endingPeriod := k.IncrementValidatorPeriod(ctx, val)
+	return k.CalculateDelegationRewards(ctx, val, del, endingPeriod)
+}
+
+// rewardQueryIsReadOnly reports whether a reward query should use the non-mutating
+// path for the block being executed. The read-only behavior ships in v6.7; before
+// it is active the query must reproduce the old validator-period increment so that
+// non-tracing block-by-block sync and tracing of pre-v6.7 blocks both reproduce
+// the state committed at that height.
+//   - Tracing: the era is signaled by the trace harness via ClosestUpgradeName
+//     (see app.RPCContextProvider); it is empty during live execution.
+//   - Live / non-tracing replay: gate on the upgrade being active at ctx.BlockHeight(),
+//     which is derived from the persisted upgrade "done" marker and therefore tracks
+//     the block being (re-)executed. If the checker is unset (some test harnesses),
+//     default to the old state-mutating behavior, which is always reward-correct.
+func (k Keeper) rewardQueryIsReadOnly(ctx sdk.Context) bool {
+	if ctx.IsTracing() {
+		return semver.Compare(ctx.ClosestUpgradeName(), ReadOnlyRewardsUpgrade) >= 0
+	}
+	return k.upgradeChecker != nil &&
+		k.upgradeChecker.IsUpgradeActiveAtHeight(ctx, ReadOnlyRewardsUpgrade, ctx.BlockHeight())
 }
 
 // calculateDelegationRewards is the shared core of the reward calculation. When

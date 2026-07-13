@@ -22,6 +22,19 @@ type Keeper struct {
 	blockedAddrs map[string]bool
 
 	feeCollectorName string // name of the FeeCollector ModuleAccount
+
+	// upgradeChecker gates upgrade-dependent behavior (see DelegationRewardsForQuery).
+	// Optional: set post-construction via SetUpgradeChecker once the upgrade keeper
+	// exists. Nil when unset (e.g. some test harnesses).
+	upgradeChecker types.UpgradeChecker
+}
+
+// SetUpgradeChecker wires the upgrade checker used to gate upgrade-dependent
+// behavior. It must be called before the keeper is copied into the module manager
+// / query server (mirroring how staking hooks are wired in app wiring).
+func (k Keeper) SetUpgradeChecker(uc types.UpgradeChecker) Keeper {
+	k.upgradeChecker = uc
+	return k
 }
 
 // NewKeeper creates a new distribution Keeper instance

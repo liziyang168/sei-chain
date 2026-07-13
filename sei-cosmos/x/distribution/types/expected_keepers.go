@@ -6,6 +6,13 @@ import (
 	stakingtypes "github.com/sei-protocol/sei-chain/sei-cosmos/x/staking/types"
 )
 
+// UpgradeChecker reports whether a named upgrade is active at a given height. It
+// is used to gate behavior changes so that historical re-execution (block-by-block
+// sync and tracing) reproduces the state committed at each height.
+type UpgradeChecker interface {
+	IsUpgradeActiveAtHeight(ctx sdk.Context, name string, height int64) bool
+}
+
 // AccountKeeper defines the expected account keeper used for simulations (noalias)
 type AccountKeeper interface {
 	GetAccount(ctx sdk.Context, addr sdk.AccAddress) types.AccountI
