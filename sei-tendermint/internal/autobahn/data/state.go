@@ -351,7 +351,11 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	initRoad := types.RoadIndex(0)
 	if inner.nextQC > 0 {
 		if lastQC := inner.qcs[inner.nextQC-1]; lastQC != nil {
-			initRoad = lastQC.QC().Proposal().Index()
+			// Use Index+1 to mirror the live PushQC boundary-advance: when the last
+			// committed QC is the final road of epoch N, TrioAt(N.Last) returns
+			// Current=ep(N), but TrioAt(N.Last+1) correctly returns Current=ep(N+1),
+			// matching the epochTrio the live path stored before the crash.
+			initRoad = lastQC.QC().Proposal().Index() + 1
 		}
 	}
 	initTrio, err := cfg.Registry.TrioAt(initRoad)

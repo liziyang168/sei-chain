@@ -105,12 +105,13 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 // AdvanceIfNeeded ensures the epoch following appQC's epoch exists in the registry.
 // Creates the next epoch with the genesis committee if absent.
 //
-// Seeding model: an AppQC at road R (epoch N) seeds epoch N+1. The execution
-// pipeline runs ~one epoch ahead of CommitQC, so by the time CommitQC reaches
-// the midpoint of epoch N, AppQC has already delivered roads from epoch N+1,
-// causing AdvanceIfNeeded to seed epoch N+2. Consensus's midpoint liveness gate
-// (consensus/inner.go) checks that epoch N+2 is present and stalls if AppQC has
-// not yet caught up — this is intentional back-pressure, not a bug.
+// Seeding model: an AppQC at road R (epoch N) seeds epoch N+1. Execution is
+// downstream of CommitQC — AppQC for road R is produced only after CommitQC for
+// road R is finalized — so AppQC never runs ahead of consensus.
+// Consensus's midpoint liveness gate (consensus/inner.go) checks that epoch N+1
+// is present; since the first AppQC in epoch N seeds N+1 immediately, the gate
+// is trivially satisfied today. The gate will enforce a stricter N+2 check once
+// AppQC carries the committee derived from the last block of epoch N (future step).
 //
 // EpochLength is chosen large enough that this is always called before any
 // CommitQC for epoch N+1 reaches data.State — guaranteeing data can look up

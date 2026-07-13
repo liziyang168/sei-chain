@@ -209,18 +209,17 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 		if i.View() != proposal.View() || i.TimeoutVote.IsPresent() || i.PrepareVote.IsPresent() {
 			return nil
 		}
-		// At the midpoint of epoch N, gate on epoch N+2 being seeded in the registry.
-		// C_{e+2} = Committee(end(e)): the execution layer derives the N+2 committee
-		// from the last block of epoch N and delivers it via AppQC from epoch N+1 roads.
-		// The AppQC pipeline runs ~one epoch ahead of CommitQC, so by the midpoint of
-		// epoch N, AdvanceIfNeeded has already processed AppQC from epoch N+1 and seeded
-		// N+2. This gate is intentional back-pressure: if AppQC is lagging, consensus
-		// stalls here rather than entering epoch N+1 without a known N+2 committee.
+		// At the midpoint of epoch N, gate on epoch N+1 being seeded in the registry.
+		// The first AppQC in epoch N seeds N+1 via AdvanceIfNeeded, so this is
+		// trivially satisfied today (all epochs share the genesis committee).
+		// TODO: tighten to N+2 once AppQC carries the committee derived from the last
+		// block of epoch N — at that point N+2 won't be seeded until execution
+		// finalizes end(N), and this gate becomes meaningful back-pressure.
 		if proposal.Proposal().Msg().Index() == i.epoch.RoadRange().MidPoint() {
-			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+2) * epoch.EpochLength); err != nil {
-				logger.Error("refusing PrepareVote: epoch N+2 not yet seeded at epoch midpoint",
+			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+1) * epoch.EpochLength); err != nil {
+				logger.Error("refusing PrepareVote: epoch N+1 not yet seeded at epoch midpoint",
 					"road", proposal.Proposal().Msg().Index(),
-					"missing", i.epoch.EpochIndex()+2)
+					"missing", i.epoch.EpochIndex()+1)
 				return nil
 			}
 		}
