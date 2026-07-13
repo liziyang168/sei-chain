@@ -562,7 +562,7 @@ func (s *State) headers(ctx context.Context, lr *types.LaneRange) ([]*types.Bloc
 				}
 				// Check if we have the header.
 				if entry, ok := q.q[n].byHash[want]; ok {
-					h := entry.votes[0].Msg().Header()
+					h := entry.header
 					want = h.ParentHash()
 					headers[len(headers)-i-1] = h
 					break

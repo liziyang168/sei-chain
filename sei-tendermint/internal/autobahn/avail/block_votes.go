@@ -4,15 +4,29 @@ import (
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
 )
 
+// laneVoteSet tracks weighted votes for a single block hash.
+// header is set on the first vote and never cleared by reweight, so callers
+// can always recover the block header even after committee rotation empties votes.
+type laneVoteSet struct {
+	weight uint64
+	votes  []*types.Signed[*types.LaneVote]
+	header *types.BlockHeader
+}
+
+func (s *laneVoteSet) reweight() {
+	s.weight = 0
+	s.votes = s.votes[:0]
+}
+
 type blockVotes struct {
 	byKey  map[types.PublicKey]*types.Signed[*types.LaneVote]
-	byHash map[types.BlockHeaderHash]*voteSet[*types.Signed[*types.LaneVote]]
+	byHash map[types.BlockHeaderHash]*laneVoteSet
 }
 
 func newBlockVotes() blockVotes {
 	return blockVotes{
 		byKey:  map[types.PublicKey]*types.Signed[*types.LaneVote]{},
-		byHash: map[types.BlockHeaderHash]*voteSet[*types.Signed[*types.LaneVote]]{},
+		byHash: map[types.BlockHeaderHash]*laneVoteSet{},
 	}
 }
 
@@ -29,7 +43,7 @@ func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVot
 	bv.byKey[k] = vote
 	byHash, ok := bv.byHash[h]
 	if !ok {
-		byHash = &voteSet[*types.Signed[*types.LaneVote]]{}
+		byHash = &laneVoteSet{header: vote.Msg().Header()}
 		bv.byHash[h] = byHash
 	}
 	if byHash.weight >= c.LaneQuorum() {
@@ -47,11 +61,12 @@ func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVot
 // newEpoch's committee. Called when the epoch advances so that votes from
 // validators who were in the next epoch are now counted. Returns true if any
 // block hash newly reached quorum under the new committee.
+// Each laneVoteSet.reweight() clears weight and votes but preserves header,
+// so headers() can always recover block headers even after committee rotation.
 func (bv blockVotes) reweight(newEpoch *types.Epoch) bool {
 	c := newEpoch.Committee()
 	for _, set := range bv.byHash {
-		set.weight = 0
-		set.votes = set.votes[:0]
+		set.reweight()
 	}
 	quorumReached := false
 	for k, vote := range bv.byKey {

@@ -145,16 +145,11 @@ func (s *State) pushCommitQC(qc *types.CommitQC) error {
 		if qc.Proposal().Index() < i.View().Index {
 			return nil
 		}
-		// CommitQC advances to new index; look up the epoch for the next road.
-		nextEpIdx := qc.Proposal().EpochIndex()
-		if qc.Proposal().Index() == i.epoch.RoadRange().Last {
-			nextEpIdx++
-		}
-		nextEp, err := i.registry.EpochAt(types.RoadIndex(nextEpIdx) * epoch.EpochLength)
+		nextEp, err := i.registry.EpochAt(qc.Proposal().Index() + 1)
 		if err != nil {
 			logger.Error("next epoch not in registry at CommitQC boundary",
-				"epochIndex", nextEpIdx, "road", qc.Proposal().Index())
-			return fmt.Errorf("epoch %d not in registry", nextEpIdx)
+				"road", qc.Proposal().Index()+1)
+			return fmt.Errorf("EpochAt(%d): %w", qc.Proposal().Index()+1, err)
 		}
 		iSend.Store(inner{persistedInner: persistedInner{CommitQC: utils.Some(qc)}, registry: i.registry, epoch: nextEp})
 	}
@@ -210,10 +205,14 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 			return nil
 		}
 		// At the midpoint of epoch N, gate on epoch N+2 being seeded in the registry.
-		// AdvanceIfNeeded seeds both N+1 and N+2 from each epoch-N AppQC, so the
-		// first AppQC of epoch N satisfies this gate immediately. The gate ensures
-		// that TrioAt(N.Last+1) — called at the epoch boundary in data and avail —
-		// always finds N+2 as Next without erroring.
+		// AdvanceIfNeeded (called by executeBlock) seeds N+2 on every executed block
+		// in epoch N, so the gate is satisfied as soon as any block in epoch N has
+		// been executed. This ensures TrioAt(N.Last+1) — called at the epoch boundary
+		// in data and avail — always finds N+2 as Next without erroring.
+		// Note: this is a best-effort gate for actively-voting nodes. A node that
+		// catches up past the midpoint via CommitQC sync (without processing the
+		// midpoint proposal) bypasses the check; that is acceptable because such a
+		// node has already executed enough blocks to seed N+2 anyway.
 		if proposal.Proposal().Msg().Index() == i.epoch.RoadRange().MidPoint() {
 			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+2) * epoch.EpochLength); err != nil {
 				logger.Error("refusing PrepareVote: epoch N+2 not yet seeded at epoch midpoint",
