@@ -22,6 +22,7 @@ func NewGigaFullnodeRouter(cfg *GigaRouterCommonConfig, key NodeSecretKey) (*gig
 	if err != nil {
 		return nil, err
 	}
+	dataState.Registry().SealSeeding()
 	logger.Info("GigaRouter initialized (fullnode)", "validators", len(cfg.ValidatorAddrs), "dial_interval", cfg.DialInterval, "inbound_fullnode_cap", cfg.MaxInboundFullnodePeers)
 	return &gigaFullnodeRouter{
 		gigaRouterCommon: &gigaRouterCommon{
