@@ -380,8 +380,9 @@ func (s *State) EpochTrio() *atomic.Pointer[types.EpochTrio] { return &s.epochTr
 // Even if the qc was already pushed earlier, the blocks are pushed anyway.
 func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*types.Block) error {
 	// epochTrio is updated atomically inside the lock at epoch boundaries.
-	// AdvanceIfNeeded (AppQC path) always fires before any CommitQC for the
-	// same epoch, so the epoch for this QC is guaranteed present.
+	// EpochForRoad searches the Prev/Current/Next window. A QC more than one
+	// epoch behind Current has its blocks below the prune cursor and would be
+	// a no-op even if accepted, so erroring out here is correct.
 	ep, err := s.epochTrio.Load().EpochForRoad(qc.QC().Proposal().Index())
 	if err != nil {
 		return err
