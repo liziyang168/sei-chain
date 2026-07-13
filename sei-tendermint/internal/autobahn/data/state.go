@@ -412,6 +412,10 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 			return fmt.Errorf("qc.Verify(): %w", err)
 		}
 	}
+	// blocks is the subset of blocks finalized by this QC, so they all belong
+	// to the same epoch as the QC. Using ep here is intentional and asymmetric
+	// with PushBlock, which resolves the committee from the stored QC at each
+	// block's position rather than from the incoming QC.
 	byHash := map[types.BlockHeaderHash]*types.Block{}
 	committee := ep.Committee()
 	for _, b := range blocks {

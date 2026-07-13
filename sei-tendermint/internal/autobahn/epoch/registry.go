@@ -71,12 +71,19 @@ func (r *Registry) FirstBlock() types.GlobalBlockNumber {
 // if the epoch has not been registered via AdvanceIfNeeded.
 func (r *Registry) EpochAt(roadIndex types.RoadIndex) (*types.Epoch, error) {
 	epochIdx := types.EpochIndex(roadIndex / EpochLength)
-	for s := range r.state.Lock() {
+	// Fast path: read lock covers the common post-seal case.
+	for s := range r.state.RLock() {
 		if ep, ok := s.m[epochIdx]; ok {
 			return ep, nil
 		}
 		if !s.seeding {
 			return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
+		}
+	}
+	// Slow path: seeding phase with a missing epoch — create under write lock.
+	for s := range r.state.Lock() {
+		if ep, ok := s.m[epochIdx]; ok {
+			return ep, nil // re-check after acquiring write lock
 		}
 		ep, _ := r.makeEpoch(s, epochIdx) //nolint:errcheck // genesis always present
 		if ep == nil {
@@ -115,6 +122,12 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 // the execution layer computes it from the last block of epoch N.
 func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
 	nextNextIdx := types.EpochIndex(roadIndex/EpochLength) + 2
+	// Fast path: epoch already seeded (common after the first block of the epoch).
+	for s := range r.state.RLock() {
+		if _, ok := s.m[nextNextIdx]; ok {
+			return
+		}
+	}
 	for s := range r.state.Lock() {
 		if _, ok := s.m[nextNextIdx]; !ok {
 			_, _ = r.makeEpoch(s, nextNextIdx) //nolint:errcheck // genesis always present
