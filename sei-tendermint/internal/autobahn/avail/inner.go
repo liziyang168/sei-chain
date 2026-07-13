@@ -151,10 +151,15 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 	return i, nil
 }
 
-func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, trio types.EpochTrio) (*types.LaneQC, bool) {
-	c := trio.Current.Committee()
+// laneQC returns a LaneQC for (lane, n) under ep — the committee, quorum, and
+// per-epoch vote set all resolved from ep. Callers pass the epoch the proposal
+// is being built for; using ep (not the cached trio's Current) keeps the lookup
+// consistent with the lanes WaitForLaneQCs iterates, which can differ from
+// Current across an epoch boundary.
+func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) (*types.LaneQC, bool) {
+	c := ep.Committee()
 	quorum := c.LaneQuorum()
-	epIdx := trio.Current.EpochIndex()
+	epIdx := ep.EpochIndex()
 	for _, byEpoch := range i.votes[lane].q[n].byHash {
 		if set, ok := byEpoch[epIdx]; ok && set.weight >= quorum {
 			return types.NewLaneQC(set.votes), true

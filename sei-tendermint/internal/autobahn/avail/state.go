@@ -641,7 +641,7 @@ func (s *State) WaitForLaneQCs(
 			for lane := range ep.Committee().Lanes().All() {
 				first := types.LaneRangeOpt(prev, lane).Next()
 				for i := range types.BlockNumber(types.MaxLaneRangeInProposal) {
-					if qc, ok := inner.laneQC(lane, first+i, *s.epochTrio.Load()); ok {
+					if qc, ok := inner.laneQC(lane, first+i, ep); ok {
 						laneQCs[lane] = qc
 					} else {
 						break

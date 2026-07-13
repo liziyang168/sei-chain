@@ -30,7 +30,11 @@ func (s *laneVoteSet) add(weight, quorum uint64, vote *types.Signed[*types.LaneV
 // EpochTrio.VerifyInWindow accepts it against Current or Next, so accumulating
 // into exactly those two epochs is complete.
 type blockVotes struct {
-	// byKey dedups votes: one vote per signer per block.
+	// byKey dedups votes (one per signer per block) and is the durable record
+	// applyEpoch replays to back-fill an epoch entering the window. Entries are
+	// never deleted individually — a signer weight-0 in the current window may
+	// have weight in a later epoch — the whole map is freed when the block
+	// number is pruned from the vote queue (inner.prune).
 	byKey map[types.PublicKey]*types.Signed[*types.LaneVote]
 	// byHash maps a block hash to its per-epoch vote sets. Every set is
 	// non-empty (created only when a weighted vote is appended), so headers()
