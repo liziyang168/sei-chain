@@ -16,8 +16,9 @@ func newBlockVotes() blockVotes {
 	}
 }
 
+// pushVote may store the vote for the current and next Epoch, but only
+// accumulates weight for currentEpoch.
 // Returns true iff a new QC has been constructed.
-// TODO: handle epoch transitions — weight must be counted per-epoch committee once multi-epoch is wired up.
 func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVote]) (*types.LaneQC, bool) {
 	c := ep.Committee()
 	k := vote.Key()
@@ -40,4 +41,34 @@ func (bv blockVotes) pushVote(ep *types.Epoch, vote *types.Signed[*types.LaneVot
 		return types.NewLaneQC(byHash.votes), true
 	}
 	return nil, false
+}
+
+// reweight recalculates weights and vote lists for all stored votes using
+// newEpoch's committee. Called when the epoch advances so that votes from
+// validators who were in the next epoch are now counted. Returns true if any
+// block hash newly reached quorum under the new committee.
+func (bv blockVotes) reweight(newEpoch *types.Epoch) bool {
+	c := newEpoch.Committee()
+	for _, set := range bv.byHash {
+		set.weight = 0
+		set.votes = set.votes[:0]
+	}
+	quorumReached := false
+	for k, vote := range bv.byKey {
+		w := c.Weight(k)
+		if w == 0 {
+			continue
+		}
+		h := vote.Msg().Header().Hash()
+		set := bv.byHash[h]
+		if set.weight >= c.LaneQuorum() {
+			continue
+		}
+		set.weight += w
+		set.votes = append(set.votes, vote)
+		if set.weight >= c.LaneQuorum() {
+			quorumReached = true
+		}
+	}
+	return quorumReached
 }

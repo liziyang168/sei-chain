@@ -1,21 +1,26 @@
 package epoch
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils"
 )
 
+// EpochLength is the number of road indices per epoch.
+const EpochLength types.RoadIndex = 108_000
+
 type registryState struct {
-	m      map[types.EpochIndex]*types.Epoch
-	latest types.EpochIndex
+	m       map[types.EpochIndex]*types.Epoch
+	latest  types.EpochIndex
+	seeding bool // true until SealSeeding is called
 }
 
 // Registry is the authoritative source of epoch and committee information.
 // All layers (consensus, data, avail) read from it.
 type Registry struct {
-	state utils.RWMutex[registryState]
+	state utils.RWMutex[*registryState]
 }
 
 // NewRegistry creates a Registry with the genesis committee.
@@ -24,13 +29,31 @@ func NewRegistry(
 	firstBlock types.GlobalBlockNumber,
 	genesisTimestamp time.Time,
 ) (*Registry, error) {
-	ep := types.NewEpoch(0, types.OpenRoadRange(), genesisTimestamp, committee, firstBlock)
+	ep := types.NewEpoch(0, types.RoadRange{First: 0, Last: EpochLength - 1}, genesisTimestamp, committee, firstBlock)
 	return &Registry{
-		state: utils.NewRWMutex(registryState{
-			m:      map[types.EpochIndex]*types.Epoch{0: ep},
-			latest: 0,
+		state: utils.NewRWMutex(&registryState{
+			m:       map[types.EpochIndex]*types.Epoch{0: ep},
+			latest:  0,
+			seeding: true,
 		}),
 	}, nil
+}
+
+// SealSeeding marks the end of the initialization seeding phase. After this
+// call, EpochAt will no longer auto-generate missing epochs; new epochs can
+// only be created via AdvanceIfNeeded (driven by AppQC).
+//
+// Must be called once, after all layers (data, avail, consensus) have finished
+// their NewState initialization.
+//
+// TODO: during the seeding phase, epochs are generated with the genesis
+// committee as a placeholder. Once epoch state is included in snapshots,
+// replace this with reconstruction from the snapshot so that restarted nodes
+// use the real per-epoch committees immediately.
+func (r *Registry) SealSeeding() {
+	for s := range r.state.Lock() {
+		s.seeding = false
+	}
 }
 
 // FirstBlock returns the first global block number of the genesis epoch.
@@ -42,42 +65,90 @@ func (r *Registry) FirstBlock() types.GlobalBlockNumber {
 	panic("unreachable")
 }
 
-// GenesisTimestamp returns the timestamp of the genesis epoch.
-func (r *Registry) GenesisTimestamp() time.Time {
-	for s := range r.state.RLock() {
-		return s.m[0].FirstTimestamp()
-	}
-	panic("unreachable")
-}
-
-// EpochByIndex returns the epoch with the given index, if it exists.
-func (r *Registry) EpochByIndex(idx types.EpochIndex) (*types.Epoch, bool) {
-	for s := range r.state.RLock() {
-		ep, ok := s.m[idx]
-		return ep, ok
-	}
-	panic("unreachable")
-}
-
-// LatestEpoch returns the most recently activated epoch.
-func (r *Registry) LatestEpoch() *types.Epoch {
-	for s := range r.state.RLock() {
-		return s.m[s.latest]
-	}
-	panic("unreachable")
-}
-
-// VerifyInWindow calls fn against the latest epoch's committee and returns it if accepted.
-// Returns a slice of all matching epochs so callers can skip re-verification for any
-// epoch already checked here.
-// TODO: expand to neighbor epochs (previous and next) once multi-epoch transitions are wired up.
-func (r *Registry) VerifyInWindow(fn func(*types.Committee) error) ([]*types.Epoch, error) {
-	for s := range r.state.RLock() {
-		ep := s.m[s.latest]
-		if err := fn(ep.Committee()); err != nil {
-			return nil, err
+// EpochAt returns the epoch for the given road index.
+// During the seeding phase (before SealSeeding), missing epochs are
+// auto-generated with the genesis committee. After seeding, returns an error
+// if the epoch has not been registered via AdvanceIfNeeded.
+func (r *Registry) EpochAt(roadIndex types.RoadIndex) (*types.Epoch, error) {
+	epochIdx := types.EpochIndex(roadIndex / EpochLength)
+	for s := range r.state.Lock() {
+		if ep, ok := s.m[epochIdx]; ok {
+			return ep, nil
 		}
-		return []*types.Epoch{ep}, nil
+		if !s.seeding {
+			return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
+		}
+		ep, _ := r.makeEpoch(s, epochIdx) //nolint:errcheck // genesis always present
+		if ep == nil {
+			return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
+		}
+		return ep, nil
 	}
 	panic("unreachable")
+}
+
+// makeEpoch constructs a new epoch at epochIdx using the genesis committee and
+// inserts it into s. Caller must hold the write lock.
+// Note: does NOT advance s.latest; that only happens on real epoch activation.
+func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*types.Epoch, error) {
+	genesis, ok := s.m[0]
+	if !ok {
+		return nil, fmt.Errorf("genesis epoch missing from registry")
+	}
+	firstRoad := types.RoadIndex(uint64(epochIdx) * uint64(EpochLength))
+	lastRoad := firstRoad + EpochLength - 1
+	epoch := types.NewEpoch(epochIdx, types.RoadRange{First: firstRoad, Last: lastRoad}, genesis.FirstTimestamp(), genesis.Committee(), genesis.FirstBlock())
+	s.m[epochIdx] = epoch
+	return epoch, nil
+}
+
+// AdvanceIfNeeded ensures the epoch following appQC's epoch exists in the registry.
+// Creates the next epoch with the genesis committee if absent.
+//
+// Seeding model: an AppQC at road R (epoch N) seeds epoch N+1. The execution
+// pipeline runs ~one epoch ahead of CommitQC, so by the time CommitQC reaches
+// the midpoint of epoch N, AppQC has already delivered roads from epoch N+1,
+// causing AdvanceIfNeeded to seed epoch N+2. Consensus's midpoint liveness gate
+// (consensus/inner.go) checks that epoch N+2 is present and stalls if AppQC has
+// not yet caught up — this is intentional back-pressure, not a bug.
+//
+// EpochLength is chosen large enough that this is always called before any
+// CommitQC for epoch N+1 reaches data.State — guaranteeing data can look up
+// the new epoch from the window without falling back to EpochAt.
+//
+// TODO: real committee rotation — the next epoch's committee must be derived from
+// stake changes recorded in the blocks up to appQC. This requires the execution
+// layer to pass in the new committee alongside the AppQC. Until that bridge is
+// wired, all epochs are created with the genesis committee as a placeholder.
+func (r *Registry) AdvanceIfNeeded(appQC *types.AppQC) {
+	currentIdx := types.EpochIndex(appQC.Proposal().RoadIndex() / EpochLength)
+	nextIdx := currentIdx + 1
+	for s := range r.state.Lock() {
+		if _, ok := s.m[nextIdx]; !ok {
+			_, _ = r.makeEpoch(s, nextIdx) //nolint:errcheck // genesis always present
+		}
+		if currentIdx > s.latest {
+			s.latest = currentIdx
+		}
+	}
+}
+
+// TrioAt returns the EpochTrio centered on the epoch containing roadIndex.
+// During the seeding phase, missing epochs are auto-generated (same as EpochAt).
+// Returns an error if Current or Next is not in the registry after seeding.
+func (r *Registry) TrioAt(roadIndex types.RoadIndex) (types.EpochTrio, error) {
+	centerIdx := types.EpochIndex(roadIndex / EpochLength)
+	current, err := r.EpochAt(types.RoadIndex(centerIdx) * EpochLength)
+	if err != nil {
+		return types.EpochTrio{}, fmt.Errorf("epoch %d (road %d) not in registry", centerIdx, roadIndex)
+	}
+	next, err := r.EpochAt(types.RoadIndex(centerIdx+1) * EpochLength)
+	if err != nil {
+		return types.EpochTrio{}, fmt.Errorf("next epoch %d not in registry", centerIdx+1)
+	}
+	trio := types.EpochTrio{Current: current, Next: next}
+	if centerIdx > 0 {
+		trio.Prev, _ = r.EpochAt(types.RoadIndex(centerIdx-1) * EpochLength)
+	}
+	return trio, nil
 }

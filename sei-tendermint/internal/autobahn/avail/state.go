@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/avail/metrics"
@@ -31,9 +32,10 @@ const BlocksPerLane = 3 * types.MaxLaneRangeInProposal
 // to trigger internal pruning, which allows it to manage memory independently
 // of the main consensus loop.
 type State struct {
-	key   types.SecretKey
-	data  *data.State
-	inner utils.Watch[*inner]
+	key       types.SecretKey
+	data      *data.State
+	inner     utils.Watch[*inner]
+	epochTrio atomic.Pointer[types.EpochTrio]
 
 	// persisters groups all disk persistence components.
 	// Always initialized: real when stateDir is set, no-op otherwise.
@@ -156,17 +158,42 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		return nil, err
 	}
 
-	ep := data.Registry().LatestEpoch()
-	inner, err := newInner(ep, loaded)
+	// TODO: in production a node should always restart from a snapshot rather than
+	// genesis; starting from road 0 is only correct on the very first boot.
+	startRoadIdx := types.RoadIndex(0)
+	if ls, ok := loaded.Get(); ok {
+		if anchor, ok := ls.pruneAnchor.Get(); ok {
+			startRoadIdx = anchor.CommitQC.Proposal().Index()
+		}
+	}
+	startTrio, err := data.Registry().TrioAt(startRoadIdx)
+	if err != nil {
+		return nil, fmt.Errorf("TrioAt(%d): %w", startRoadIdx, err)
+	}
+	inner, err := newInner(startTrio, loaded)
 	if err != nil {
 		return nil, err
+	}
+	finalTrio := startTrio
+	if inner.commitQCs.next > startTrio.Current.RoadRange().Last {
+		nextTrio, err := data.Registry().TrioAt(inner.commitQCs.next)
+		if err != nil {
+			return nil, fmt.Errorf("TrioAt(%d): %w", inner.commitQCs.next, err)
+		}
+		inner.reweightForNextEpoch(nextTrio)
+		finalTrio = nextTrio
 	}
 
 	// Truncate WAL entries below the prune anchor that were filtered out by
 	// loadPersistedState.
 	if ls, ok := loaded.Get(); ok {
 		if anchor, ok := ls.pruneAnchor.Get(); ok {
-			for lane := range ep.Committee().Lanes().All() {
+			anchorTrio, err := data.Registry().TrioAt(anchor.CommitQC.Proposal().Index())
+			if err != nil {
+				return nil, fmt.Errorf("TrioAt(%d): %w", anchor.CommitQC.Proposal().Index(), err)
+			}
+			lanes := anchorTrio.CurrentAndNextLanes()
+			for lane := range lanes {
 				if err := pers.blocks.MaybePruneAndPersistLane(lane, utils.Some(anchor.CommitQC), nil, utils.None[func(*types.Signed[*types.LaneProposal])]()); err != nil {
 					return nil, fmt.Errorf("prune stale block WAL entries: %w", err)
 				}
@@ -177,12 +204,14 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		}
 	}
 
-	return &State{
+	s := &State{
 		key:        key,
 		data:       data,
 		inner:      utils.NewWatch(inner),
 		persisters: pers,
-	}, nil
+	}
+	s.epochTrio.Store(&finalTrio)
+	return s, nil
 }
 
 func (s *State) FirstCommitQC() types.RoadIndex {
@@ -262,9 +291,12 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return err
 		}
 	}
-	ep, ok := s.data.Registry().EpochByIndex(qc.Proposal().EpochIndex())
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", qc.Proposal().EpochIndex())
+	// epochTrio is updated atomically inside the lock at epoch boundaries, so
+	// this outside-lock read sees either the current epoch or the just-rotated
+	// one — both are valid for verifying a CommitQC at idx.
+	ep, err := s.epochTrio.Load().EpochForRoad(idx)
+	if err != nil {
+		return fmt.Errorf("EpochAt(%d): %w", idx, err)
 	}
 	if err := qc.Verify(ep); err != nil {
 		return fmt.Errorf("qc.Verify(): %w", err)
@@ -273,8 +305,20 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		if idx != inner.commitQCs.next {
 			return nil
 		}
-		if qc.Proposal().EpochIndex() != inner.epoch.EpochIndex() {
-			return fmt.Errorf("commitQC epoch_index %d != current epoch %d", qc.Proposal().EpochIndex(), inner.epoch.EpochIndex())
+		// At an epoch boundary, initialize lanes for the next epoch.
+		// The next epoch must already be registered: AdvanceIfNeeded pre-generates
+		// it during epoch N, well before any CommitQC at the boundary. A miss here
+		// is a registry bug — fail loudly rather than continuing with stale state.
+		if idx == s.epochTrio.Load().Current.RoadRange().Last {
+			nextTrio, err := s.data.Registry().TrioAt(idx + 1)
+			if err != nil {
+				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
+			}
+			quorumReached := inner.reweightForNextEpoch(nextTrio)
+			s.epochTrio.Store(&nextTrio)
+			if quorumReached {
+				ctrl.Updated()
+			}
 		}
 		inner.commitQCs.pushBack(qc)
 		metrics.ObserveCommitQC(qc)
@@ -289,12 +333,12 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 
 // PushAppVote pushes an AppVote to the state.
 func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]) error {
-	ep, ok := s.data.Registry().EpochByIndex(v.Msg().Proposal().EpochIndex())
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", v.Msg().Proposal().EpochIndex())
+	idx := v.Msg().Proposal().RoadIndex()
+	ep, err := s.epochTrio.Load().EpochForRoad(idx)
+	if err != nil {
+		return fmt.Errorf("EpochAt(%d): %w", idx, err)
 	}
 	committee := ep.Committee()
-	idx := v.Msg().Proposal().RoadIndex()
 	if err := v.VerifySig(committee); err != nil {
 		return fmt.Errorf("v.VerifySig(): %w", err)
 	}
@@ -322,12 +366,13 @@ func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]
 		if !ok {
 			return nil
 		}
-		updated, err := inner.prune(committee, appQC, qc)
+		updated, err := inner.prune(appQC, qc)
 		if err != nil {
 			return err
 		}
 		if updated {
 			ctrl.Updated()
+			s.data.Registry().AdvanceIfNeeded(appQC)
 		}
 	}
 	return nil
@@ -342,9 +387,9 @@ func (s *State) PushAppQC(appQC *types.AppQC, commitQC *types.CommitQC) error {
 			return nil
 		}
 	}
-	ep, ok := s.data.Registry().EpochByIndex(commitQC.Proposal().EpochIndex())
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", commitQC.Proposal().EpochIndex())
+	ep, err := s.epochTrio.Load().EpochForRoad(commitQC.Proposal().Index())
+	if err != nil {
+		return fmt.Errorf("EpochAt(%d): %w", commitQC.Proposal().Index(), err)
 	}
 	if err := appQC.Verify(ep.Committee()); err != nil {
 		return fmt.Errorf("appQC.Verify(): %w", err)
@@ -363,14 +408,19 @@ func (s *State) PushAppQC(appQC *types.AppQC, commitQC *types.CommitQC) error {
 	if !commitQC.GlobalRange().Has(appQC.Proposal().GlobalNumber()) {
 		return fmt.Errorf("appQC GlobalNumber not in commitQC range")
 	}
+	var accepted bool
 	for inner, ctrl := range s.inner.Lock() {
-		updated, err := inner.prune(ep.Committee(), appQC, commitQC)
+		updated, err := inner.prune(appQC, commitQC)
 		if err != nil {
 			return err
 		}
 		if updated {
+			accepted = true
 			ctrl.Updated()
 		}
+	}
+	if accepted {
+		s.data.Registry().AdvanceIfNeeded(appQC)
 	}
 	return nil
 }
@@ -412,7 +462,7 @@ func (s *State) PushBlock(ctx context.Context, p *types.Signed[*types.LanePropos
 	if p.Key() != h.Lane() {
 		return fmt.Errorf("signer %v does not match lane %v", p.Key(), h.Lane())
 	}
-	if _, err := s.data.Registry().VerifyInWindow(func(c *types.Committee) error {
+	if _, err := s.epochTrio.Load().VerifyInWindow(func(c *types.Committee) error {
 		if err := p.Msg().Verify(c); err != nil {
 			return err
 		}
@@ -464,7 +514,7 @@ func (s *State) PushBlock(ctx context.Context, p *types.Signed[*types.LanePropos
 // Waits until the lane has enough capacity for the new vote.
 // It does NOT wait for the previous votes.
 func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote]) error {
-	if _, err := s.data.Registry().VerifyInWindow(func(c *types.Committee) error {
+	if _, err := s.epochTrio.Load().VerifyInWindow(func(c *types.Committee) error {
 		if err := vote.Msg().Verify(c); err != nil {
 			return err
 		}
@@ -489,7 +539,10 @@ func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote
 		for q.next <= h.BlockNumber() {
 			q.pushBack(newBlockVotes())
 		}
-		if _, ok := q.q[h.BlockNumber()].pushVote(inner.epoch, vote); ok {
+		// pushVote accumulates weight using the current epoch's committee.
+		// Votes from next-epoch validators are stored (byKey) but contribute
+		// zero weight until reweightForNextEpoch runs at the epoch boundary.
+		if _, ok := q.q[h.BlockNumber()].pushVote(s.epochTrio.Load().Current, vote); ok {
 			ctrl.Updated()
 		}
 	}
@@ -538,9 +591,9 @@ func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.Ful
 	}
 	// Collect the headers from the votes.
 	var commitHeaders []*types.BlockHeader
-	ep, ok := s.data.Registry().EpochByIndex(qc.Proposal().EpochIndex())
-	if !ok {
-		return nil, fmt.Errorf("unknown epoch_index %d", qc.Proposal().EpochIndex())
+	ep, err := s.epochTrio.Load().EpochForRoad(qc.Proposal().Index())
+	if err != nil {
+		return nil, fmt.Errorf("EpochAt(%d): %w", qc.Proposal().Index(), err)
 	}
 	for lane := range ep.Committee().Lanes().All() {
 		headers, err := s.headers(ctx, qc.LaneRange(lane))
@@ -576,7 +629,7 @@ func (s *State) WaitForLaneQCs(
 			for lane := range ep.Committee().Lanes().All() {
 				first := types.LaneRangeOpt(prev, lane).Next()
 				for i := range types.BlockNumber(types.MaxLaneRangeInProposal) {
-					if qc, ok := inner.laneQC(lane, first+i); ok {
+					if qc, ok := inner.laneQC(lane, first+i, *s.epochTrio.Load()); ok {
 						laneQCs[lane] = qc
 					} else {
 						break
@@ -650,9 +703,9 @@ func (s *State) Run(ctx context.Context) error {
 				}
 
 				// Collect the blocks we have locally.
-				ep, ok := s.data.Registry().EpochByIndex(qc.QC().Proposal().EpochIndex())
-				if !ok {
-					return fmt.Errorf("unknown epoch_index %d", qc.QC().Proposal().EpochIndex())
+				ep, err := s.epochTrio.Load().EpochForRoad(qc.QC().Proposal().Index())
+				if err != nil {
+					return fmt.Errorf("EpochForRoad(%d): %w", qc.QC().Proposal().Index(), err)
 				}
 				c := ep.Committee()
 				var blocks []*types.Block
@@ -741,9 +794,9 @@ func (s *State) runPersist(ctx context.Context, pers persisters) error {
 				batchLanes[lane] = struct{}{}
 			}
 			if anchor, ok := anchorQC.Get(); ok {
-				ep, epOK := s.data.Registry().EpochByIndex(anchor.Proposal().EpochIndex())
-				if !epOK {
-					return fmt.Errorf("unknown epoch_index %d", anchor.Proposal().EpochIndex())
+				ep, err := s.epochTrio.Load().EpochForRoad(anchor.Proposal().Index())
+				if err != nil {
+					return fmt.Errorf("EpochForRoad(%d): %w", anchor.Proposal().Index(), err)
 				}
 				for lane := range ep.Committee().Lanes().All() {
 					batchLanes[lane] = struct{}{}

@@ -47,7 +47,7 @@ func TestNewFullCommitQCPersisterEmptyDir(t *testing.T) {
 
 func TestNewFullCommitQCPersisterNoop(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 5)
 
 	gp, err := NewFullCommitQCPersister(utils.None[string](), registry.FirstBlock())
@@ -71,7 +71,7 @@ func TestNewFullCommitQCPersisterNoop(t *testing.T) {
 func TestFullCommitQCPersisterFirstBlockFromWAL(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 3)
 	wantFirst := qcs[0].QC().GlobalRange().First
 
@@ -92,7 +92,7 @@ func TestFullCommitQCPersisterFirstBlockFromWAL(t *testing.T) {
 func TestFullCommitQCPersistAndReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 5)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -118,7 +118,7 @@ func TestFullCommitQCPersistAndReload(t *testing.T) {
 func TestFullCommitQCTruncateAndReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 5)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -145,7 +145,7 @@ func TestFullCommitQCTruncateAndReload(t *testing.T) {
 func TestFullCommitQCTruncateAll(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 3)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -166,7 +166,7 @@ func TestFullCommitQCTruncateAll(t *testing.T) {
 func TestFullCommitQCDuplicateIgnored(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 2)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -180,7 +180,7 @@ func TestFullCommitQCDuplicateIgnored(t *testing.T) {
 func TestFullCommitQCGapError(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 3)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -195,7 +195,7 @@ func TestFullCommitQCGapError(t *testing.T) {
 func TestFullCommitQCTruncateBeforeNoop(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 3)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -216,7 +216,7 @@ func TestFullCommitQCTruncateBeforeNoop(t *testing.T) {
 func TestFullCommitQCContinueAfterReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 6)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())
@@ -244,7 +244,7 @@ func TestFullCommitQCContinueAfterReload(t *testing.T) {
 func TestFullCommitQCTruncateMidRange(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	qcs := makeSequentialFullCommitQCs(rng, registry, keys, 5)
 
 	gp, err := NewFullCommitQCPersister(utils.Some(dir), registry.FirstBlock())

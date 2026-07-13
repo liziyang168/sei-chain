@@ -22,6 +22,9 @@ func OpenRoadRange() RoadRange { return RoadRange{First: 0, Last: utils.Max[Road
 // Has reports whether idx falls within this range (inclusive on both ends).
 func (r RoadRange) Has(idx RoadIndex) bool { return idx >= r.First && idx <= r.Last }
 
+// MidPoint returns the road index at the midpoint of the range.
+func (r RoadRange) MidPoint() RoadIndex { return r.First + (r.Last-r.First)/2 }
+
 // Epoch holds the complete context for a single epoch.
 // Retrieved from the local Registry; never transmitted on the wire.
 type Epoch struct {

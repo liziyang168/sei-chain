@@ -29,7 +29,7 @@ func TestNewGlobalBlockPersisterEmptyDir(t *testing.T) {
 
 func TestNewGlobalBlockPersisterNoop(t *testing.T) {
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 
@@ -78,7 +78,7 @@ func TestGlobalBlockPersisterFirstBlockFromWAL(t *testing.T) {
 func TestGlobalBlockPersistAndReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 
@@ -104,7 +104,7 @@ func TestGlobalBlockPersistAndReload(t *testing.T) {
 func TestGlobalBlockTruncateAndReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 10)
 
@@ -129,7 +129,7 @@ func TestGlobalBlockTruncateAndReload(t *testing.T) {
 func TestGlobalBlockTruncateAll(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 
@@ -152,7 +152,7 @@ func TestGlobalBlockTruncateAll(t *testing.T) {
 func TestGlobalBlockDuplicateIgnored(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	block := types.GenBlock(rng)
 
@@ -167,7 +167,7 @@ func TestGlobalBlockDuplicateIgnored(t *testing.T) {
 func TestGlobalBlockGapError(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	block := types.GenBlock(rng)
 
@@ -182,7 +182,7 @@ func TestGlobalBlockGapError(t *testing.T) {
 func TestGlobalBlockTruncateBeforeNoop(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 
@@ -204,7 +204,7 @@ func TestGlobalBlockTruncateBeforeNoop(t *testing.T) {
 func TestGlobalBlockContinueAfterReload(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 10)
 
@@ -233,7 +233,7 @@ func TestGlobalBlockContinueAfterReload(t *testing.T) {
 func TestGlobalBlockTruncateAfterMiddle(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 
@@ -269,7 +269,7 @@ func TestGlobalBlockTruncateAfterMiddle(t *testing.T) {
 func TestGlobalBlockTruncateAfterNoop(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 3)
 
@@ -287,7 +287,7 @@ func TestGlobalBlockTruncateAfterNoop(t *testing.T) {
 func TestGlobalBlockTruncateAfterBeforeFirst(t *testing.T) {
 	dir := t.TempDir()
 	rng := utils.TestRng()
-	_, _ = epoch.GenRegistry(rng, 3)
+	_, _, _ = epoch.GenRegistry(rng, 3)
 	fb := types.GlobalBlockNumber(0)
 	blocks := makeGlobalBlocks(rng, 5)
 

@@ -35,13 +35,14 @@ import (
 const maxInboundFullnodePeers = 10000
 
 type gigaRouterCommon struct {
-	cfg     *GigaRouterCommonConfig
-	key     NodeSecretKey
-	data    *data.State
-	service *giga.Service
-	poolIn  *giga.Pool[NodePublicKey, rpc.Server[giga.API]]
-	poolOut *giga.Pool[NodePublicKey, rpc.Client[giga.API]]
-	app     *proxy.Proxy
+	cfg       *GigaRouterCommonConfig
+	key       NodeSecretKey
+	data      *data.State
+	epochTrio *atomic.Pointer[atypes.EpochTrio]
+	service   *giga.Service
+	poolIn    *giga.Pool[NodePublicKey, rpc.Server[giga.API]]
+	poolOut   *giga.Pool[NodePublicKey, rpc.Client[giga.API]]
+	app       *proxy.Proxy
 
 	// inboundFullnodeCount tracks live non-committee inbound block-sync
 	// connections. Optimistic Add(1) + compare against cap; over-rejects
@@ -519,6 +520,6 @@ func (r *gigaRouterCommon) RunInboundConn(ctx context.Context, hConn *handshaked
 // None if the caller should handle it locally. Overridden on
 // *gigaValidatorRouter to short-circuit self-shard sends.
 func (r *gigaRouterCommon) EvmProxy(sender common.Address) utils.Option[*url.URL] {
-	shardValidator := r.data.Registry().LatestEpoch().Committee().EvmShard(sender)
+	shardValidator := r.epochTrio.Load().Current.Committee().EvmShard(sender)
 	return utils.Some(r.cfg.ValidatorAddrs[shardValidator].EVMRPC)
 }

@@ -14,7 +14,9 @@ import (
 
 func TestPruneMismatchedIndices(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
+	ep, err := registry.EpochAt(0)
+	require.NoError(t, err)
 
 	makeCommitQC := func(prev utils.Option[*types.CommitQC]) *types.CommitQC {
 		l := keys[0].Public()
@@ -23,7 +25,7 @@ func TestPruneMismatchedIndices(t *testing.T) {
 		lqcs := map[types.LaneID]*types.LaneQC{
 			l: types.NewLaneQC(makeLaneVotes(keys, b.Header())),
 		}
-		return makeCommitQC(registry.LatestEpoch(), keys, prev, lqcs, utils.None[*types.AppQC]())
+		return makeCommitQC(ep, keys, prev, lqcs, utils.None[*types.AppQC]())
 	}
 	makeAppQC := func(qcForRange *types.CommitQC, qcForIndex *types.CommitQC) *types.AppQC {
 		gr := qcForRange.GlobalRange()
@@ -49,15 +51,14 @@ func TestPruneMismatchedIndices(t *testing.T) {
 	state, err = NewState(keys[0], ds, utils.None[string]())
 	require.NoError(t, err)
 	for inner := range state.inner.Lock() {
-		_, err := inner.prune(registry.LatestEpoch().Committee(), makeAppQC(qc1, qc0), qc1)
+		_, err := inner.prune(makeAppQC(qc1, qc0), qc1)
 		require.Error(t, err, "good range, bad index should fail")
 		require.False(t, inner.latestAppQC.IsPresent(), "latestAppQC should not have been updated")
-		_, err = inner.prune(registry.LatestEpoch().Committee(), makeAppQC(qc1, qc1), qc1)
+		_, err = inner.prune(makeAppQC(qc1, qc1), qc1)
 		require.NoError(t, err, "good range, good index should succeed")
 	}
 }
 
-// testSignedBlock creates a signed lane proposal for a given lane, block number, and parent hash.
 func testSignedBlock(key types.SecretKey, lane types.LaneID, n types.BlockNumber, parent types.BlockHeaderHash, rng utils.Rng) *types.Signed[*types.LaneProposal] {
 	block := types.NewBlock(lane, n, parent, types.GenPayload(rng))
 	return types.Sign(key, types.NewLaneProposal(block))
@@ -65,9 +66,9 @@ func testSignedBlock(key types.SecretKey, lane types.LaneID, n types.BlockNumber
 
 func TestNewInnerFreshStart(t *testing.T) {
 	rng := utils.TestRng()
-	registry, _ := epoch.GenRegistry(rng, 4)
+	registry, _, _ := epoch.GenRegistry(rng, 4)
 
-	i, err := newInner(registry.LatestEpoch(), utils.None[*loadedAvailState]())
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.None[*loadedAvailState]())
 	require.NoError(t, err)
 
 	require.False(t, i.latestAppQC.IsPresent())
@@ -86,7 +87,7 @@ func TestNewInnerFreshStart(t *testing.T) {
 
 func TestDecodePruneAnchorIncomplete(t *testing.T) {
 	rng := utils.TestRng()
-	_, keys := epoch.GenRegistry(rng, 4)
+	_, keys, _ := epoch.GenRegistry(rng, 4)
 
 	appProposal := types.NewAppProposal(42, 5, types.GenAppHash(rng), 0)
 	appQC := types.NewAppQC(makeAppVotes(keys, appProposal))
@@ -100,11 +101,11 @@ func TestDecodePruneAnchorIncomplete(t *testing.T) {
 
 func TestNewInnerLoadedNoAnchor(t *testing.T) {
 	rng := utils.TestRng()
-	registry, _ := epoch.GenRegistry(rng, 4)
+	registry, _, _ := epoch.GenRegistry(rng, 4)
 
 	loaded := &loadedAvailState{}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// No anchor loaded, app votes should start at the registry's first block.
@@ -115,7 +116,7 @@ func TestNewInnerLoadedNoAnchor(t *testing.T) {
 
 func TestNewInnerLoadedBlocksContiguous(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	// Build 3 contiguous blocks: 0, 1, 2.
@@ -131,7 +132,7 @@ func TestNewInnerLoadedBlocksContiguous(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	q := i.blocks[lane]
@@ -153,14 +154,14 @@ func TestNewInnerLoadedBlocksContiguous(t *testing.T) {
 
 func TestNewInnerLoadedBlocksEmptySlice(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	loaded := &loadedAvailState{
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: {}},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	q := i.blocks[lane]
@@ -170,7 +171,7 @@ func TestNewInnerLoadedBlocksEmptySlice(t *testing.T) {
 
 func TestNewInnerLoadedBlocksUnknownLane(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	unknownKey := types.GenSecretKey(rng)
 	unknownLane := unknownKey.Public()
@@ -180,7 +181,7 @@ func TestNewInnerLoadedBlocksUnknownLane(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{unknownLane: {{Number: 0, Proposal: b}}},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	for lane := range registry.LatestEpoch().Committee().Lanes().All() {
@@ -193,7 +194,7 @@ func TestNewInnerLoadedBlocksUnknownLane(t *testing.T) {
 
 func TestNewInnerLoadedBlocksMultipleLanes(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane0 := keys[0].Public()
 	lane1 := keys[1].Public()
 
@@ -217,7 +218,7 @@ func TestNewInnerLoadedBlocksMultipleLanes(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane0: bs0, lane1: bs1},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	q0 := i.blocks[lane0]
@@ -235,7 +236,7 @@ func TestNewInnerLoadedBlocksMultipleLanes(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsNoAppQC(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Create 3 sequential CommitQCs.
 	qcs := make([]*types.CommitQC, 3)
@@ -254,7 +255,7 @@ func TestNewInnerLoadedCommitQCsNoAppQC(t *testing.T) {
 		commitQCs: loadedQCs,
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// Without anchor, commitQCs.first = 0. All 3 should be restored.
@@ -272,7 +273,7 @@ func TestNewInnerLoadedCommitQCsNoAppQC(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsWithAppQC(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// AppQC at road index 2.
 	roadIdx := types.RoadIndex(2)
@@ -300,7 +301,7 @@ func TestNewInnerLoadedCommitQCsWithAppQC(t *testing.T) {
 		commitQCs:   loadedQCs,
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// latestAppQC should be set by prune.
@@ -324,7 +325,7 @@ func TestNewInnerLoadedCommitQCsWithAppQC(t *testing.T) {
 
 func TestNewInnerLoadedAllThree(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	// AppQC at road index 2.
@@ -361,7 +362,7 @@ func TestNewInnerLoadedAllThree(t *testing.T) {
 		blocks:      map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// AppQC restored.
@@ -387,10 +388,10 @@ func TestNewInnerLoadedAllThree(t *testing.T) {
 
 func TestPruneAdvancesNextBlockToPersist(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
-	i, err := newInner(registry.LatestEpoch(), utils.None[*loadedAvailState]())
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.None[*loadedAvailState]())
 	require.NoError(t, err)
 
 	// Push blocks 0-4 on one lane.
@@ -430,7 +431,7 @@ func TestPruneAdvancesNextBlockToPersist(t *testing.T) {
 	appProposal := types.NewAppProposal(10, 2, types.GenAppHash(rng), 0)
 	appQC := types.NewAppQC(makeAppVotes(keys, appProposal))
 
-	updated, err := i.prune(registry.LatestEpoch().Committee(), appQC, qcs[2])
+	updated, err := i.prune(appQC, qcs[2])
 	require.NoError(t, err)
 	require.True(t, updated)
 
@@ -446,7 +447,7 @@ func TestPruneAdvancesNextBlockToPersist(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsAllBeforeAppQCArePruned(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Build 6 CommitQCs (indices 0-5). Anchor at index 5.
 	// All stale commitQCs (0-4) were already filtered by loadPersistedState,
@@ -465,7 +466,7 @@ func TestNewInnerLoadedCommitQCsAllBeforeAppQCArePruned(t *testing.T) {
 		pruneAnchor: utils.Some(&PruneAnchor{AppQC: appQC, CommitQC: qcs[5]}),
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// prune() pushes the anchor's CommitQC into the queue.
@@ -476,7 +477,7 @@ func TestNewInnerLoadedCommitQCsAllBeforeAppQCArePruned(t *testing.T) {
 
 func TestNewInnerAnchorWithNoCommitQCFiles(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Simulate crash between anchor write and CommitQC file write:
 	// anchor has AppQC@3 + CommitQC@3, but no CommitQC files on disk.
@@ -494,7 +495,7 @@ func TestNewInnerAnchorWithNoCommitQCFiles(t *testing.T) {
 		pruneAnchor: utils.Some(&PruneAnchor{AppQC: appQC, CommitQC: qcs[3]}),
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// prune() should push the anchor's CommitQC into the queue.
@@ -516,7 +517,7 @@ func TestNewInnerAnchorWithNoCommitQCFiles(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsGapReturnsError(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	qcs := make([]*types.CommitQC, 3)
 	prev := utils.None[*types.CommitQC]()
@@ -537,20 +538,20 @@ func TestNewInnerLoadedCommitQCsGapReturnsError(t *testing.T) {
 		commitQCs: loadedQCs,
 	}
 
-	_, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	_, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "non-contiguous")
 }
 
 func TestNewInnerLoadedCommitQCsEmpty(t *testing.T) {
 	rng := utils.TestRng()
-	registry, _ := epoch.GenRegistry(rng, 4)
+	registry, _, _ := epoch.GenRegistry(rng, 4)
 
 	loaded := &loadedAvailState{
 		commitQCs: nil,
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	require.Equal(t, types.RoadIndex(0), inner.commitQCs.first)
@@ -561,7 +562,7 @@ func TestNewInnerLoadedCommitQCsEmpty(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsGapWithAppQCAnchor(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Simulate crash scenario: disk had stale QCs [0,1,2] and a new QC at
 	// index 10. loadPersistedState pre-filters stale entries, so newInner
@@ -585,7 +586,7 @@ func TestNewInnerLoadedCommitQCsGapWithAppQCAnchor(t *testing.T) {
 		commitQCs:   loadedQCs,
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// Only QC@10 loaded.
@@ -605,7 +606,7 @@ func TestNewInnerLoadedCommitQCsGapWithAppQCAnchor(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsBelowAnchorSkipped(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Build 6 CommitQCs (0-5). Anchor at index 3.
 	// Loaded list includes stale entries [1, 2] below the anchor plus [3, 4, 5].
@@ -634,7 +635,7 @@ func TestNewInnerLoadedCommitQCsBelowAnchorSkipped(t *testing.T) {
 		commitQCs:   loadedQCs,
 	}
 
-	inner, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	inner, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// prune(3) pushes QC@3 (next=4). Indices 1,2,3 are skipped. 4,5 pushed.
@@ -647,7 +648,7 @@ func TestNewInnerLoadedCommitQCsBelowAnchorSkipped(t *testing.T) {
 
 func TestNewInnerLoadedCommitQCsGapAfterAnchorReturnsError(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 
 	// Anchor at index 2. Loaded commitQCs are [2, 3, 5] — gap at 4.
 	// After prune(2), next=3. Index 2 is skipped, 3 pushed (next=4),
@@ -673,14 +674,14 @@ func TestNewInnerLoadedCommitQCsGapAfterAnchorReturnsError(t *testing.T) {
 		commitQCs:   loadedQCs,
 	}
 
-	_, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	_, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "non-contiguous")
 }
 
 func TestNewInnerLoadedBlocksGapReturnsError(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	// Blocks 3, 4, 6, 7 with no anchor — queue starts at 0, so block 3
@@ -697,14 +698,14 @@ func TestNewInnerLoadedBlocksGapReturnsError(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	_, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	_, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "non-contiguous")
 }
 
 func TestNewInnerLoadedBlocksParentHashMismatchReturnsError(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	// Build blocks 0, 1 with correct chaining, then block 2 with wrong parent.
@@ -725,14 +726,14 @@ func TestNewInnerLoadedBlocksParentHashMismatchReturnsError(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	_, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	_, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "parent hash mismatch")
 }
 
 func TestNewInnerLoadedBlocksOverCapacityReturnsError(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	lane := keys[0].Public()
 
 	// Build BlocksPerLane + 5 contiguous blocks — more than the lane capacity.
@@ -751,14 +752,14 @@ func TestNewInnerLoadedBlocksOverCapacityReturnsError(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	_, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	_, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exceeds capacity")
 }
 
 func TestNewInnerPruneAnchorPrunesBlockQueues(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	initialBlock := types.GlobalBlockNumber(0)
 
 	// Build CommitQCs 0-2.
@@ -794,7 +795,7 @@ func TestNewInnerPruneAnchorPrunesBlockQueues(t *testing.T) {
 		blocks: map[types.LaneID][]persist.LoadedBlock{lane: bs},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// prune() should advance block queue first to the prune anchor's lane range.
@@ -807,7 +808,7 @@ func TestNewInnerPruneAnchorPrunesBlockQueues(t *testing.T) {
 
 func TestNewInnerPruneAnchorCommitQCUsedForPrune(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	initialBlock := types.GlobalBlockNumber(0)
 
 	// Build CommitQCs 0-2.
@@ -830,11 +831,55 @@ func TestNewInnerPruneAnchorCommitQCUsedForPrune(t *testing.T) {
 		},
 	}
 
-	i, err := newInner(registry.LatestEpoch(), utils.Some(loaded))
+	i, err := newInner(utils.OrPanic1(registry.TrioAt(0)), utils.Some(loaded))
 	require.NoError(t, err)
 
 	// prune(appQC@1, pruneQC@1) should advance commitQCs.first to 1.
 	require.Equal(t, types.RoadIndex(1), i.commitQCs.first)
 	// CommitQCs 1 and 2 should still be loaded.
 	require.Equal(t, types.RoadIndex(3), i.commitQCs.next)
+}
+
+func TestReweightForNextEpoch_AddsAndRemovesLanes(t *testing.T) {
+	rng := utils.TestRng()
+	registry, _, _ := epoch.GenRegistry(rng, 4)
+	trio := utils.OrPanic1(registry.TrioAt(0))
+
+	i, err := newInner(trio, utils.None[*loadedAvailState]())
+	require.NoError(t, err)
+
+	// All current lanes are present after construction.
+	for lane := range trio.Current.Committee().Lanes().All() {
+		require.Contains(t, i.blocks, lane, "lane %v missing after newInner", lane)
+	}
+
+	// Add a bogus extra lane directly.
+	var realLane types.LaneID
+	for l := range trio.Current.Committee().Lanes().All() {
+		realLane = l
+		break
+	}
+	bogusSK := types.GenSecretKey(rng)
+	bogusLane := bogusSK.Public()
+	i.blocks[bogusLane] = newQueue[types.BlockNumber, *types.Signed[*types.LaneProposal]]()
+	i.votes[bogusLane] = newQueue[types.BlockNumber, blockVotes]()
+	i.nextBlockToPersist[bogusLane] = 0
+	i.persistedBlockStart[bogusLane] = 0
+
+	// reweightForNextEpoch removes the bogus lane and keeps the real one.
+	i.reweightForNextEpoch(trio)
+	require.NotContains(t, i.blocks, bogusLane, "decommissioned lane still present")
+	require.Contains(t, i.blocks, realLane, "active lane removed incorrectly")
+}
+
+func TestReweightForNextEpoch_EmptyQueuesReturnsFalse(t *testing.T) {
+	rng := utils.TestRng()
+	registry, _, _ := epoch.GenRegistry(rng, 4)
+	trio := utils.OrPanic1(registry.TrioAt(0))
+
+	i, err := newInner(trio, utils.None[*loadedAvailState]())
+	require.NoError(t, err)
+
+	// No votes in any queue; reweight should not signal quorum.
+	require.False(t, i.reweightForNextEpoch(trio))
 }

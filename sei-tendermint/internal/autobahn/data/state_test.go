@@ -51,7 +51,7 @@ func snapshot(s *State) Snapshot {
 func TestState(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	if err := scope.Run(ctx, func(ctx context.Context, s scope.Scope) error {
 		state := utils.OrPanic1(NewState(&Config{
 			Registry: registry,
@@ -125,7 +125,7 @@ func TestState(t *testing.T) {
 func TestPushConflictingBadCommitQC(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	committee := registry.LatestEpoch().Committee()
 	state := utils.OrPanic1(NewState(&Config{
 		Registry: registry,
@@ -236,7 +236,7 @@ func TestPushConflictingBadCommitQC(t *testing.T) {
 func TestPushQCIgnoresBlocksMatchingUnverifiedHeaders(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	state := utils.OrPanic1(NewState(&Config{
 		Registry: registry,
 	}, utils.OrPanic1(NewDataWAL(utils.None[string](), registry.FirstBlock()))))
@@ -281,7 +281,7 @@ func TestPushQCIgnoresBlocksMatchingUnverifiedHeaders(t *testing.T) {
 func TestExecution(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	if err := scope.Run(ctx, func(ctx context.Context, s scope.Scope) error {
 		state := utils.OrPanic1(NewState(&Config{
 			Registry: registry,
@@ -325,7 +325,7 @@ func TestExecution(t *testing.T) {
 func TestPushBlockAcceptsBlockWithQC(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 
 	state := utils.OrPanic1(NewState(&Config{
 		Registry: registry,
@@ -358,7 +358,7 @@ func TestPushBlockAcceptsBlockWithQC(t *testing.T) {
 func TestGlobalBlockByHash(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 
 	state := utils.OrPanic1(NewState(&Config{
 		Registry: registry,
@@ -403,7 +403,7 @@ func TestGlobalBlockByHash(t *testing.T) {
 func TestReconcileCase1Empty(t *testing.T) {
 	t.Log("Reconcile case 1: Fresh start (empty/empty)")
 	rng := utils.TestRng()
-	registry, _ := epoch.GenRegistry(rng, 3)
+	registry, _, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 	fb := registry.FirstBlock()
 
@@ -423,7 +423,7 @@ func TestReconcileCase1Empty(t *testing.T) {
 func TestReconcileCase2Corrupted(t *testing.T) {
 	t.Log("Reconcile case 2: QCs lost (corruption), returns error")
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Persist blocks and QCs normally.
@@ -456,7 +456,7 @@ func TestReconcileCase3BlocksLost(t *testing.T) {
 	t.Log("Reconcile case 3: Blocks lost (crash), QCs survive")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// First run: populate both WALs.
@@ -506,7 +506,7 @@ func TestReconcileCase4Normal(t *testing.T) {
 	t.Log("Reconcile case 4: Normal (a=X, b<Y)")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build two sequential QCs with their blocks.
@@ -576,7 +576,7 @@ func TestReconcileCase4AfterPruning(t *testing.T) {
 	t.Log("Reconcile case 4 variant: Normal after pruning, both WALs truncated")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build 3 sequential QCs.
@@ -631,7 +631,7 @@ func TestReconcileCase4AfterPruning(t *testing.T) {
 func TestReconcileCase5BlocksAhead(t *testing.T) {
 	t.Log("Reconcile case 5: Prune crash, blocks ahead (a>X)")
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	qc1, blocks1 := TestCommitQC(rng, registry.LatestEpoch(), keys, utils.None[*types.CommitQC]())
@@ -677,7 +677,7 @@ func TestReconcileCase6QCsAhead(t *testing.T) {
 	t.Log("Reconcile case 6: Prune crash, QCs ahead (a<X)")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build 2 sequential QCs.
@@ -729,7 +729,7 @@ func TestReconcileCase6QCsAhead(t *testing.T) {
 func TestReconcileCase7BlocksPastQCs(t *testing.T) {
 	t.Log("Reconcile case 7: Persist crash, blocks past QCs (b>=Y)")
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build 2 sequential QCs.
@@ -780,7 +780,7 @@ func TestReconcileCase7BlocksTail(t *testing.T) {
 	t.Log("Reconcile case 7: Persist crash, tail truncation with re-push")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build 2 sequential QCs.
@@ -829,7 +829,7 @@ func TestReconcileCase8BlocksBehind(t *testing.T) {
 	t.Log("Reconcile case 8: QCs ahead normal (b<Y)")
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build 2 sequential QCs.
@@ -881,7 +881,7 @@ func TestReconcilePartialQCPrefix(t *testing.T) {
 	// Reconcile: partial QC prefix from per-block pruning
 	t.Log("Reconcile: partial QC prefix from per-block pruning")
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	// Build one QC with enough blocks to split.
@@ -938,7 +938,7 @@ func TestReconcileBlockGap(t *testing.T) {
 	// Reconcile: block gap in WAL detected (defense in depth)
 	t.Log("Reconcile: block gap in WAL detected (defense in depth)")
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	qc1, blocks1 := TestCommitQC(rng, registry.LatestEpoch(), keys, utils.None[*types.CommitQC]())
@@ -974,7 +974,7 @@ func TestReconcileBlockGap(t *testing.T) {
 func TestPruningKeepsLastQCRange(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	dw := utils.OrPanic1(NewDataWAL(utils.Some(dir), registry.FirstBlock()))
@@ -1019,7 +1019,7 @@ func TestPruningKeepsLastQCRange(t *testing.T) {
 func TestPruningWithPartialQCRange(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	dir := t.TempDir()
 
 	dw := utils.OrPanic1(NewDataWAL(utils.Some(dir), registry.FirstBlock()))
@@ -1075,7 +1075,7 @@ func TestPruningWithPartialQCRange(t *testing.T) {
 // the state has no QCs (e.g. on first startup before any data arrives).
 func TestRunPruningEmptyState(t *testing.T) {
 	rng := utils.TestRng()
-	registry, _ := epoch.GenRegistry(rng, 3)
+	registry, _, _ := epoch.GenRegistry(rng, 3)
 
 	state := utils.OrPanic1(NewState(&Config{
 		Registry:   registry,
@@ -1092,7 +1092,7 @@ func TestPushBlockWaitsForQC(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := t.Context()
 		rng := utils.TestRng()
-		registry, keys := epoch.GenRegistry(rng, 3)
+		registry, keys, _ := epoch.GenRegistry(rng, 3)
 
 		state := utils.OrPanic1(NewState(&Config{
 			Registry: registry,
@@ -1134,5 +1134,33 @@ func TestPushBlockWaitsForQC(t *testing.T) {
 		got, err := state.TryBlock(gr2.First)
 		require.NoError(t, err)
 		require.Equal(t, blocks2[0], got)
+	})
+}
+
+func TestPushQC_AdvancesEpochTrioAtBoundary(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rng := utils.TestRng()
+		// startEpoch=1: seeds epochs 0, 1, 2 so TrioAt works after advancing past epoch 0.
+		registry, keys := epoch.GenRegistryAt(rng, 3, 1)
+		state := utils.OrPanic1(NewState(&Config{Registry: registry},
+			utils.OrPanic1(NewDataWAL(utils.None[string](), registry.FirstBlock()))))
+
+		ep0 := state.epochTrio.Load().Current
+		require.Equal(t, types.EpochIndex(0), ep0.EpochIndex())
+
+		// Build a CommitQC at the last road of epoch 0 (no lane blocks needed).
+		view := types.View{EpochIndex: ep0.EpochIndex(), Index: epoch.EpochLength - 1}
+		vote := types.NewCommitVote(types.ProposalAt(ep0, view))
+		vs := make([]*types.Signed[*types.CommitVote], len(keys))
+		for i, k := range keys {
+			vs[i] = types.Sign(k, vote)
+		}
+		qc := types.NewFullCommitQC(types.NewCommitQC(vs), nil)
+
+		require.NoError(t, state.PushQC(t.Context(), qc, nil))
+
+		if got := state.epochTrio.Load().Current.EpochIndex(); got != 1 {
+			t.Fatalf("epochTrio.Current after epoch boundary = %d, want 1", got)
+		}
 	})
 }

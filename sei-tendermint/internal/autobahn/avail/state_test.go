@@ -89,7 +89,7 @@ func testState(t *testing.T, stateDir utils.Option[string]) {
 	t.Helper()
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	committee := registry.LatestEpoch().Committee()
 
 	if err := scope.Run(ctx, func(ctx context.Context, s scope.Scope) error {
@@ -216,7 +216,7 @@ func testState(t *testing.T, stateDir utils.Option[string]) {
 // loadPersistedState (stale entries below the prune anchor are discarded).
 func TestStateRestartFromPersisted(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -321,7 +321,7 @@ func TestStateRestartFromPersisted(t *testing.T) {
 
 func TestStateMismatchedQCs(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	initialBlock := registry.FirstBlock()
 
@@ -380,7 +380,7 @@ func TestStateMismatchedQCs(t *testing.T) {
 func TestPushBlockRejectsBadParentHash(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 
 	ds := utils.OrPanic1(data.NewState(&data.Config{
 		Registry: registry,
@@ -405,7 +405,7 @@ func TestPushBlockRejectsBadParentHash(t *testing.T) {
 func TestPushBlockRejectsWrongSigner(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 3)
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
 
 	ds := utils.OrPanic1(data.NewState(&data.Config{
 		Registry: registry,
@@ -423,7 +423,7 @@ func TestPushBlockRejectsWrongSigner(t *testing.T) {
 
 func TestNewStateWithPersistence(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	initialBlock := types.GlobalBlockNumber(0)
 
 	t.Run("empty dir loads fresh state", func(t *testing.T) {
@@ -815,4 +815,43 @@ func TestWaitForLaneQCs_OnlyReturnsCommitteeLanes(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// TestPushAppQCPreviousEpoch verifies that an AppQC whose road index falls in
+// epoch N-1 is accepted when the registry is seeded at epoch N. This exercises
+// the path where a late AppQC arrives after an epoch boundary has been crossed.
+func TestPushAppQCPreviousEpoch(t *testing.T) {
+	rng := utils.TestRng()
+	registry, keys, _ := epoch.GenRegistry(rng, 3)
+
+	epochN1, err := registry.EpochAt(0) // epoch 0 (N-1)
+	require.NoError(t, err)
+	epochN, err := registry.EpochAt(epoch.EpochLength) // epoch 1 (N)
+	require.NoError(t, err)
+
+	// Build a CommitQC at the last road of epoch N-1.
+	lane := keys[0].Public()
+	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
+	laneQCs := map[types.LaneID]*types.LaneQC{
+		lane: types.NewLaneQC(makeLaneVotes(keys, block.Header())),
+	}
+	commitQC := makeCommitQC(epochN1, keys, utils.None[*types.CommitQC](), laneQCs, utils.None[*types.AppQC]())
+
+	// Build an AppQC referencing that CommitQC — it carries epoch N-1's index.
+	gr := commitQC.GlobalRange()
+	appProposal := types.NewAppProposal(gr.First, commitQC.Index(), types.GenAppHash(rng), epochN1.EpochIndex())
+	appQC := types.NewAppQC(makeAppVotes(keys, appProposal))
+
+	// Build a CommitQC at epoch N so the state is "at epoch N".
+	_ = epochN
+
+	ds := utils.OrPanic1(data.NewState(&data.Config{Registry: registry},
+		utils.OrPanic1(data.NewDataWAL(utils.None[string](), registry.FirstBlock()))))
+	state, err := NewState(keys[0], ds, utils.None[string]())
+	require.NoError(t, err)
+
+	// Push the epoch-N CommitQC first so the state has it, then push the late AppQC.
+	require.NoError(t, state.PushCommitQC(t.Context(), commitQC))
+	require.NoError(t, state.PushAppQC(appQC, commitQC),
+		"AppQC from epoch N-1 should be accepted when registry has epoch N-1 registered")
 }

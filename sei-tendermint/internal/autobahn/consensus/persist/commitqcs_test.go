@@ -106,7 +106,7 @@ func TestNewCommitQCPersisterEmptyDir(t *testing.T) {
 
 func TestPersistCommitQCAndLoad(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -135,7 +135,7 @@ func TestPersistCommitQCAndLoad(t *testing.T) {
 
 func TestCommitQCDeleteBeforeRemovesOldKeepsNew(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -158,7 +158,7 @@ func TestCommitQCDeleteBeforeRemovesOldKeepsNew(t *testing.T) {
 
 func TestCommitQCDeleteBeforeZero(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -186,7 +186,7 @@ func TestCommitQCDeleteBeforeZero(t *testing.T) {
 
 func TestCommitQCPersistDuplicateIsNoOp(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -204,7 +204,7 @@ func TestCommitQCPersistDuplicateIsNoOp(t *testing.T) {
 
 func TestCommitQCPersistGapRejected(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -223,7 +223,7 @@ func TestCommitQCPersistGapRejected(t *testing.T) {
 
 func TestLoadAllDetectsCommitQCGap(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -247,7 +247,7 @@ func TestLoadAllDetectsCommitQCGap(t *testing.T) {
 
 func TestNoOpCommitQCPersister(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	qcs := makeSequentialCommitQCs(committee, keys, 11)
 
@@ -281,7 +281,7 @@ func TestNoOpCommitQCPersister(t *testing.T) {
 
 func TestCommitQCDeleteBeforePastAll(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -313,7 +313,7 @@ func TestCommitQCDeleteBeforePastAll(t *testing.T) {
 // must re-establish the cursor so subsequent persists succeed.
 func TestCommitQCDeleteBeforePastAllCrashRecovery(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -357,7 +357,7 @@ func TestCommitQCDeleteBeforePastAllCrashRecovery(t *testing.T) {
 // re-establishes the cursor for subsequent writes.
 func TestCommitQCDeleteBeforeWithAnchorRecovers(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -396,7 +396,7 @@ func TestCommitQCDeleteBeforeWithAnchorRecovers(t *testing.T) {
 
 func TestCommitQCDeleteBeforeThenPersistMore(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -422,7 +422,7 @@ func TestCommitQCDeleteBeforeThenPersistMore(t *testing.T) {
 
 func TestCommitQCDeleteBeforeAlreadyPruned(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 
@@ -451,7 +451,7 @@ func TestCommitQCDeleteBeforeAlreadyPruned(t *testing.T) {
 
 func TestCommitQCProgressiveDeleteBefore(t *testing.T) {
 	rng := utils.TestRng()
-	registry, keys := epoch.GenRegistry(rng, 4)
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
 	committee := registry.LatestEpoch().Committee()
 	dir := t.TempDir()
 

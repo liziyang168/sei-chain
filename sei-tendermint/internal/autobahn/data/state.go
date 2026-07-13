@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
@@ -202,12 +203,8 @@ func (i *inner) skipTo(n types.GlobalBlockNumber) {
 // insertQC verifies and inserts a FullCommitQC into the inner state.
 // Accepts QCs whose range starts at or before nextQC (partially pruned
 // prefix is silently skipped). Rejects gaps where gr.First > nextQC.
-func (i *inner) insertQC(registry *epoch.Registry, qc *types.FullCommitQC) error {
-	e, ok := registry.EpochByIndex(qc.QC().Proposal().EpochIndex())
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", qc.QC().Proposal().EpochIndex())
-	}
-	if err := qc.Verify(e); err != nil {
+func (i *inner) insertQC(qc *types.FullCommitQC, ep *types.Epoch) error {
+	if err := qc.Verify(ep); err != nil {
 		return fmt.Errorf("qc.Verify(): %w", err)
 	}
 	gr := qc.QC().GlobalRange()
@@ -224,7 +221,7 @@ func (i *inner) insertQC(registry *epoch.Registry, qc *types.FullCommitQC) error
 	return nil
 }
 
-// insertBlock inserts a pre-verified block into the inner state.
+// insertBlock inserts a block into the inner state.
 // Requires a QC to already be present for block n. Callers must verify
 // the block signature before calling.
 //
@@ -232,7 +229,7 @@ func (i *inner) insertQC(registry *epoch.Registry, qc *types.FullCommitQC) error
 // updateNextBlock after inserting one or more blocks. This separation
 // allows batch insertion (e.g. PushQC inserts multiple blocks, then
 // advances nextBlock once).
-func (i *inner) insertBlock(committee *types.Committee, n types.GlobalBlockNumber, block *types.Block) error {
+func (i *inner) insertBlock(n types.GlobalBlockNumber, block *types.Block) error {
 	if n < i.first || n >= i.nextQC {
 		return nil // outside QC range
 	}
@@ -283,7 +280,12 @@ type State struct {
 	cfg     *Config
 	metrics *metrics.Metrics
 	inner   utils.Watch[*inner]
-	dataWAL *DataWAL
+	// epochTrio is a snapshot of the registry window centered on the epoch of
+	// the latest CommitQC. Refreshed inside the PushQC lock whenever a CommitQC
+	// crosses an epoch boundary. EvmProxy reads epochTrio.Current.Committee()
+	// to forward user transactions to the correct validators.
+	epochTrio atomic.Pointer[types.EpochTrio]
+	dataWAL   *DataWAL
 }
 
 // NewState constructs a new data State.
@@ -304,7 +306,11 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	// Restore QCs. insertQC handles partially pruned QCs (range starts
 	// before inner.first) by skipping the pruned prefix.
 	for _, qc := range dataWAL.CommitQCs.ConsumeLoaded() {
-		if err := inner.insertQC(cfg.Registry, qc); err != nil {
+		ep, err := cfg.Registry.EpochAt(qc.QC().Proposal().Index())
+		if err != nil {
+			return nil, fmt.Errorf("load QC from WAL: epoch lookup: %w", err)
+		}
+		if err := inner.insertQC(qc, ep); err != nil {
 			return nil, fmt.Errorf("load QC from WAL: %w", err)
 		}
 	}
@@ -319,15 +325,14 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 		}
 		expectedBlock = lb.Number + 1
 		qc := inner.qcs[lb.Number]
-		e, ok := cfg.Registry.EpochByIndex(qc.QC().Proposal().EpochIndex())
-		if !ok {
-			return nil, fmt.Errorf("unknown epoch_index %d", qc.QC().Proposal().EpochIndex())
+		ep, err := cfg.Registry.EpochAt(qc.QC().Proposal().Index())
+		if err != nil {
+			return nil, fmt.Errorf("load block %d from WAL: epoch lookup: %w", lb.Number, err)
 		}
-		committee := e.Committee()
-		if err := lb.Block.Verify(committee); err != nil {
-			return nil, fmt.Errorf("load block %d from WAL: %w", lb.Number, err)
+		if err := lb.Block.Verify(ep.Committee()); err != nil {
+			return nil, fmt.Errorf("load block %d from WAL: verify: %w", lb.Number, err)
 		}
-		if err := inner.insertBlock(committee, lb.Number, lb.Block); err != nil {
+		if err := inner.insertBlock(lb.Number, lb.Block); err != nil {
 			return nil, fmt.Errorf("load block %d from WAL: %w", lb.Number, err)
 		}
 	}
@@ -343,25 +348,43 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 		return nil, fmt.Errorf("blocks WAL cursor %d behind inner.nextBlock %d after reconciliation",
 			dataWAL.Blocks.Next(), inner.nextBlock)
 	}
-	return &State{
+	initRoad := types.RoadIndex(0)
+	if inner.nextQC > 0 {
+		if lastQC := inner.qcs[inner.nextQC-1]; lastQC != nil {
+			initRoad = lastQC.QC().Proposal().Index()
+		}
+	}
+	initTrio, err := cfg.Registry.TrioAt(initRoad)
+	if err != nil {
+		return nil, fmt.Errorf("init epochTrio: %w", err)
+	}
+	s := &State{
 		cfg:     cfg,
 		metrics: metrics.Get(),
 		inner:   utils.NewWatch(inner),
 		dataWAL: dataWAL,
-	}, nil
+	}
+	s.epochTrio.Store(&initTrio)
+	return s, nil
 }
 
 // Registry returns the epoch registry.
 func (s *State) Registry() *epoch.Registry { return s.cfg.Registry }
 
+// EpochTrio returns the atomic pointer to the current epoch window.
+// Callers may read it directly (e.g. EvmProxy) without going through State.
+func (s *State) EpochTrio() *atomic.Pointer[types.EpochTrio] { return &s.epochTrio }
+
 // PushQC pushes FullCommitQC and a subset of blocks that were finalized by it.
 // Pushing the qc and blocks is atomic, so that no unnecessary GetBlock RPCs are issued.
 // Even if the qc was already pushed earlier, the blocks are pushed anyway.
 func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*types.Block) error {
-	// Wait until QC is needed.
-	ep, ok := s.cfg.Registry.EpochByIndex(qc.QC().Proposal().EpochIndex())
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", qc.QC().Proposal().EpochIndex())
+	// epochTrio is updated atomically inside the lock at epoch boundaries.
+	// AdvanceIfNeeded (AppQC path) always fires before any CommitQC for the
+	// same epoch, so the epoch for this QC is guaranteed present.
+	ep, err := s.epochTrio.Load().EpochForRoad(qc.QC().Proposal().Index())
+	if err != nil {
+		return err
 	}
 	gr := qc.QC().GlobalRange()
 	needQC, err := func() (bool, error) {
@@ -399,6 +422,14 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 				inner.qcs[inner.nextQC] = qc
 				inner.nextQC += 1
 			}
+			idx := qc.QC().Proposal().Index()
+			if idx == s.epochTrio.Load().Current.RoadRange().Last {
+				nextTrio, err := s.cfg.Registry.TrioAt(idx + 1)
+				if err != nil {
+					return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
+				}
+				s.epochTrio.Store(&nextTrio)
+			}
 			ctrl.Updated()
 		}
 		if len(byHash) == 0 {
@@ -408,13 +439,8 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 		for n := max(inner.nextBlock, gr.First); n < min(gr.Next, inner.nextQC); n += 1 {
 			storedQC := inner.qcs[n]
 			storedGR := storedQC.QC().GlobalRange()
-			storedEp, ok := s.cfg.Registry.EpochByIndex(storedQC.QC().Proposal().EpochIndex())
-			if !ok {
-				return fmt.Errorf("unknown epoch_index %d", storedQC.QC().Proposal().EpochIndex())
-			}
-			storedCommittee := storedEp.Committee()
 			if b, ok := byHash[storedQC.Headers()[n-storedGR.First].Hash()]; ok {
-				if err := inner.insertBlock(storedCommittee, n, b); err != nil {
+				if err := inner.insertBlock(n, b); err != nil {
 					return err
 				}
 			}
@@ -444,7 +470,7 @@ func (s *State) QC(ctx context.Context, n types.GlobalBlockNumber) (*types.FullC
 // PushBlock pushes block to the state.
 // The QC for n must already be present (guaranteed by PushQC ordering).
 func (s *State) PushBlock(ctx context.Context, n types.GlobalBlockNumber, block *types.Block) error {
-	var epochIdx types.EpochIndex
+	var ep *types.Epoch
 	for inner, ctrl := range s.inner.Lock() {
 		if err := ctrl.WaitUntil(ctx, func() bool { return n < inner.nextQC }); err != nil {
 			return err
@@ -453,11 +479,11 @@ func (s *State) PushBlock(ctx context.Context, n types.GlobalBlockNumber, block 
 			// Block arrived after pruning; drop silently so the sender keeps delivering future blocks.
 			return nil
 		}
-		epochIdx = inner.qcs[n].QC().Proposal().EpochIndex()
-	}
-	ep, ok := s.cfg.Registry.EpochByIndex(epochIdx)
-	if !ok {
-		return fmt.Errorf("unknown epoch_index %d", epochIdx)
+		var err error
+		ep, err = s.epochTrio.Load().EpochForRoad(inner.qcs[n].QC().Proposal().Index())
+		if err != nil {
+			return fmt.Errorf("epoch not in window: %w", err)
+		}
 	}
 	// Verify outside the lock against the known epoch.
 	if err := block.Verify(ep.Committee()); err != nil {
@@ -467,7 +493,7 @@ func (s *State) PushBlock(ctx context.Context, n types.GlobalBlockNumber, block 
 		if n < inner.first {
 			return nil
 		}
-		if err := inner.insertBlock(ep.Committee(), n, block); err != nil {
+		if err := inner.insertBlock(n, block); err != nil {
 			return err
 		}
 		inner.updateNextBlock(s.metrics)

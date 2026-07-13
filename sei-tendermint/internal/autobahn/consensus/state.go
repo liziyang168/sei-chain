@@ -89,7 +89,12 @@ func NewState(cfg *Config, data *data.State) (*State, error) {
 		pers = utils.Some(p)
 		persistedData = d
 	}
-	return newState(cfg, data, pers, persistedData)
+	s, err := newState(cfg, data, pers, persistedData)
+	if err != nil {
+		return nil, err
+	}
+	data.Registry().SealSeeding()
+	return s, nil
 }
 
 // newState is the internal constructor exposed for tests that need to inject
@@ -123,7 +128,7 @@ func newState(
 		prepareVotes: utils.NewMutex(newPrepareVotes()),
 		commitVotes:  utils.NewMutex(newCommitVotes()),
 
-		myView:        utils.NewAtomicSend(types.ViewSpec{Epoch: initialInner.epoch}),
+		myView:        utils.NewAtomicSend(types.ViewSpec{CommitQC: initialInner.CommitQC, TimeoutQC: initialInner.TimeoutQC, Epoch: initialInner.epoch}),
 		myProposal:    utils.NewAtomicSend(utils.None[*types.FullProposal]()),
 		myPrepareVote: utils.NewAtomicSend(utils.None[*types.ConsensusReqPrepareVote]()),
 		myCommitVote:  utils.NewAtomicSend(utils.None[*types.ConsensusReqCommitVote]()),

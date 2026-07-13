@@ -94,7 +94,8 @@ const innerFile = "inner"
 
 type inner struct {
 	persistedInner
-	epoch *types.Epoch
+	registry *epoch.Registry
+	epoch    *types.Epoch
 }
 
 // View returns the current view, embedding the epoch's index.
@@ -117,17 +118,18 @@ func newInner(data utils.Option[*pb.PersistedInner], registry *epoch.Registry) (
 		persisted = *decoded
 	}
 
-	// TODO: when AddEpoch is wired, resolve the epoch from the persisted QC/proposal
-	// rather than assuming LatestEpoch — otherwise a restart after an epoch transition
-	// fails validation with an epoch/road mismatch.
-	ep := registry.LatestEpoch()
-	if err := persisted.validate(ep); err != nil {
+	nextViewRoad := types.NextIndexOpt(persisted.CommitQC)
+	startEpoch, err := registry.EpochAt(nextViewRoad)
+	if err != nil {
+		return inner{}, fmt.Errorf("EpochAt(%d): %w", nextViewRoad, err)
+	}
+	if err := persisted.validate(startEpoch); err != nil {
 		return inner{}, err
 	}
 
 	logger.Info("restored consensus state", "state", innerProtoConv.Encode(&persisted))
 
-	return inner{persistedInner: persisted, epoch: ep}, nil
+	return inner{persistedInner: persisted, registry: registry, epoch: startEpoch}, nil
 }
 
 func (s *State) pushCommitQC(qc *types.CommitQC) error {
@@ -143,9 +145,18 @@ func (s *State) pushCommitQC(qc *types.CommitQC) error {
 		if qc.Proposal().Index() < i.View().Index {
 			return nil
 		}
-		// CommitQC advances to new index; clear all state for new view.
-		// TODO: rotate ep when epoch transitions are wired up.
-		iSend.Store(inner{persistedInner: persistedInner{CommitQC: utils.Some(qc)}, epoch: i.epoch})
+		// CommitQC advances to new index; look up the epoch for the next road.
+		nextEpIdx := qc.Proposal().EpochIndex()
+		if qc.Proposal().Index() == i.epoch.RoadRange().Last {
+			nextEpIdx++
+		}
+		nextEp, err := i.registry.EpochAt(types.RoadIndex(nextEpIdx) * epoch.EpochLength)
+		if err != nil {
+			logger.Error("next epoch not in registry at CommitQC boundary",
+				"epochIndex", nextEpIdx, "road", qc.Proposal().Index())
+			return fmt.Errorf("epoch %d not in registry", nextEpIdx)
+		}
+		iSend.Store(inner{persistedInner: persistedInner{CommitQC: utils.Some(qc)}, registry: i.registry, epoch: nextEp})
 	}
 	return nil
 }
@@ -172,7 +183,8 @@ func (s *State) pushTimeoutQC(ctx context.Context, qc *types.TimeoutQC) error {
 			return nil
 		}
 		// TimeoutQC advances view number; clear votes and prepareQC (stale view).
-		isend.Store(inner{persistedInner: persistedInner{CommitQC: i.CommitQC, TimeoutQC: utils.Some(qc)}, epoch: i.epoch})
+		// Epoch is unchanged: the road index did not advance, so i.epoch carries over.
+		isend.Store(inner{persistedInner: persistedInner{CommitQC: i.CommitQC, TimeoutQC: utils.Some(qc)}, registry: i.registry, epoch: i.epoch})
 	}
 	return nil
 }
@@ -196,6 +208,21 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 		i := isend.Load()
 		if i.View() != proposal.View() || i.TimeoutVote.IsPresent() || i.PrepareVote.IsPresent() {
 			return nil
+		}
+		// At the midpoint of epoch N, gate on epoch N+2 being seeded in the registry.
+		// C_{e+2} = Committee(end(e)): the execution layer derives the N+2 committee
+		// from the last block of epoch N and delivers it via AppQC from epoch N+1 roads.
+		// The AppQC pipeline runs ~one epoch ahead of CommitQC, so by the midpoint of
+		// epoch N, AdvanceIfNeeded has already processed AppQC from epoch N+1 and seeded
+		// N+2. This gate is intentional back-pressure: if AppQC is lagging, consensus
+		// stalls here rather than entering epoch N+1 without a known N+2 committee.
+		if proposal.Proposal().Msg().Index() == i.epoch.RoadRange().MidPoint() {
+			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+2) * epoch.EpochLength); err != nil {
+				logger.Error("refusing PrepareVote: epoch N+2 not yet seeded at epoch midpoint",
+					"road", proposal.Proposal().Msg().Index(),
+					"missing", i.epoch.EpochIndex()+2)
+				return nil
+			}
 		}
 		v := types.Sign(s.cfg.Key, types.NewPrepareVote(proposal.Proposal().Msg()))
 		i.PrepareVote = utils.Some(v)

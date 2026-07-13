@@ -16,7 +16,6 @@ import (
 // BlockPersister creates lane WALs lazily inside MaybePruneAndPersistLane, but the new
 // member must also appear in inner.blocks before the next persist cycle.
 type inner struct {
-	epoch          *types.Epoch
 	latestAppQC    utils.Option[*types.AppQC]
 	latestCommitQC utils.AtomicSend[utils.Option[*types.CommitQC]]
 	appVotes       *queue[types.GlobalBlockNumber, appVotes]
@@ -57,16 +56,16 @@ type loadedAvailState struct {
 	blocks      map[types.LaneID][]persist.LoadedBlock
 }
 
-func newInner(epoch *types.Epoch, loaded utils.Option[*loadedAvailState]) (*inner, error) {
+func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailState]) (*inner, error) {
+	lanes := startEpochTrio.CurrentAndNextLanes()
 	votes := map[types.LaneID]*queue[types.BlockNumber, blockVotes]{}
 	blocks := map[types.LaneID]*queue[types.BlockNumber, *types.Signed[*types.LaneProposal]]{}
-	for lane := range epoch.Committee().Lanes().All() {
+	for lane := range lanes {
 		votes[lane] = newQueue[types.BlockNumber, blockVotes]()
 		blocks[lane] = newQueue[types.BlockNumber, *types.Signed[*types.LaneProposal]]()
 	}
 
 	i := &inner{
-		epoch:               epoch,
 		latestAppQC:         utils.None[*types.AppQC](),
 		latestCommitQC:      utils.NewAtomicSend(utils.None[*types.CommitQC]()),
 		appVotes:            newQueue[types.GlobalBlockNumber, appVotes](),
@@ -76,7 +75,7 @@ func newInner(epoch *types.Epoch, loaded utils.Option[*loadedAvailState]) (*inne
 		nextBlockToPersist:  make(map[types.LaneID]types.BlockNumber, len(votes)),
 		persistedBlockStart: make(map[types.LaneID]types.BlockNumber, len(votes)),
 	}
-	i.appVotes.prune(epoch.FirstBlock())
+	i.appVotes.prune(startEpochTrio.Current.FirstBlock())
 
 	l, ok := loaded.Get()
 	if !ok {
@@ -91,8 +90,7 @@ func newInner(epoch *types.Epoch, loaded utils.Option[*loadedAvailState]) (*inne
 			slog.Uint64("roadIndex", uint64(anchor.AppQC.Proposal().RoadIndex())),
 			slog.Uint64("globalNumber", uint64(anchor.AppQC.Proposal().GlobalNumber())),
 		)
-		// TODO: use the committee of the anchor's epoch once epoch transitions are wired up.
-		if _, err := i.prune(epoch.Committee(), anchor.AppQC, anchor.CommitQC); err != nil {
+		if _, err := i.prune(anchor.AppQC, anchor.CommitQC); err != nil {
 			return nil, fmt.Errorf("prune: %w", err)
 		}
 		for lane := range i.blocks {
@@ -115,14 +113,20 @@ func newInner(epoch *types.Epoch, loaded utils.Option[*loadedAvailState]) (*inne
 		i.latestCommitQC.Store(utils.Some(i.commitQCs.q[i.commitQCs.next-1]))
 	}
 
-	// Restore persisted blocks. Since the anchor is persisted first and
-	// blocks are written sequentially per lane, gaps, parent-hash
-	// mismatches, and over-capacity indicate corruption or a bug.
+	// Restore persisted blocks. Create queues on demand for any lane present
+	// in the WAL — lanes outside the current epoch will be pruned by
+	// reweightForNextEpoch in NewState if a boundary was crossed.
 	for lane, bs := range l.blocks {
-		q, ok := i.blocks[lane]
-		if !ok || len(bs) == 0 {
+		if len(bs) == 0 {
 			continue
 		}
+		if _, ok := i.blocks[lane]; !ok {
+			i.blocks[lane] = newQueue[types.BlockNumber, *types.Signed[*types.LaneProposal]]()
+			i.votes[lane] = newQueue[types.BlockNumber, blockVotes]()
+			i.nextBlockToPersist[lane] = 0
+			i.persistedBlockStart[lane] = 0
+		}
+		q := i.blocks[lane]
 		var lastHash types.BlockHeaderHash
 		for j, b := range bs {
 			if q.Len() >= BlocksPerLane {
@@ -147,20 +151,57 @@ func newInner(epoch *types.Epoch, loaded utils.Option[*loadedAvailState]) (*inne
 	return i, nil
 }
 
-// TODO: filter votes per-epoch committee once epoch transitions are wired up.
-func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber) (*types.LaneQC, bool) {
-	c := i.epoch.Committee()
+func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, trio types.EpochTrio) (*types.LaneQC, bool) {
+	quorum := trio.Current.Committee().LaneQuorum()
 	for _, byHash := range i.votes[lane].q[n].byHash {
-		if byHash.weight >= c.LaneQuorum() {
-			return types.NewLaneQC(byHash.votes[:]), true
+		if byHash.weight >= quorum {
+			return types.NewLaneQC(byHash.votes), true
 		}
 	}
 	return nil, false
 }
 
+// reweightForNextEpoch initializes queues for any new lanes in nextTrio.Current and
+// recalculates vote weights across all lanes using the new committee.
+// Returns true if any block newly reached quorum under the new committee.
+func (i *inner) reweightForNextEpoch(nextTrio types.EpochTrio) bool {
+	activeLanes := nextTrio.CurrentAndNextLanes()
+	for lane := range nextTrio.Current.Committee().Lanes().All() {
+		if _, ok := i.blocks[lane]; !ok {
+			i.blocks[lane] = newQueue[types.BlockNumber, *types.Signed[*types.LaneProposal]]()
+		}
+		if _, ok := i.votes[lane]; !ok {
+			i.votes[lane] = newQueue[types.BlockNumber, blockVotes]()
+		}
+		if _, ok := i.nextBlockToPersist[lane]; !ok {
+			i.nextBlockToPersist[lane] = 0
+		}
+		if _, ok := i.persistedBlockStart[lane]; !ok {
+			i.persistedBlockStart[lane] = 0
+		}
+	}
+	for lane := range i.blocks {
+		if _, ok := activeLanes[lane]; !ok {
+			delete(i.blocks, lane)
+			delete(i.votes, lane)
+			delete(i.nextBlockToPersist, lane)
+			delete(i.persistedBlockStart, lane)
+		}
+	}
+	quorumReached := false
+	for _, voteQueue := range i.votes {
+		for n := voteQueue.first; n < voteQueue.next; n++ {
+			if voteQueue.q[n].reweight(nextTrio.Current) {
+				quorumReached = true
+			}
+		}
+	}
+	return quorumReached
+}
+
 // prune advances the state to account for a new AppQC/CommitQC pair.
 // Returns true if pruning occurred, false if the QC was stale.
-func (i *inner) prune(c *types.Committee, appQC *types.AppQC, commitQC *types.CommitQC) (bool, error) {
+func (i *inner) prune(appQC *types.AppQC, commitQC *types.CommitQC) (bool, error) {
 	idx := appQC.Proposal().RoadIndex()
 	if idx != commitQC.Proposal().Index() {
 		return false, fmt.Errorf("mismatched QCs: appQC index %v, commitQC index %v", idx, commitQC.Proposal().Index())
