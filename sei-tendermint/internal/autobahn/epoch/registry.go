@@ -52,19 +52,18 @@ func NewRegistry(
 
 // WaitForEpoch blocks until epochIdx has been registered, or ctx is done.
 //
-// Waiting on the single highestEpoch value is sufficient because epochs are
-// registered in increasing order without gaps: seeding is driven by sequential
-// block execution (AdvanceIfNeeded seeds N+2 from an epoch-N block), and
-// execution cannot reach an epoch-N block without first passing every
-// epoch-(N-1) block, which seeds N+1. So a higher epoch is never registered
-// before a lower one, and highestEpoch >= epochIdx implies epochIdx is present.
+// Waiting on the single highestEpoch value is sufficient for the live path:
+// AdvanceIfNeeded registers epochs contiguously ahead of execution (N → N+2),
+// and callers only wait for Current.EpochIndex()+2. SetupInitialTrio may also
+// raise highestEpoch while leaving gaps below the restart tip; those gaps are
+// never WaitForEpoch targets (callers do not wait for epochs behind tip).
 //
 // Used at an epoch boundary: a node whose CommitQC stream has outrun its own
 // block execution waits here rather than failing, and unblocks once execution
 // catches up.
 //
 // CALLER CONTRACT: only block execution (AdvanceIfNeeded -> makeEpoch) advances
-// highestEpoch and wakes this wait, so callers MUST NOT hold any lock on that path —
+// highestEpoch for live waits, so callers MUST NOT hold any lock on that path —
 // notably the avail/data inner lock — or the wake can never fire. WaitForEpoch
 // itself holds no registry lock while blocked (it waits on the highestEpoch channel).
 func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) error {
