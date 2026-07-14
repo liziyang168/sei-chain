@@ -908,8 +908,11 @@ func (s *State) markBlockPersisted(lane types.LaneID, next types.BlockNumber) {
 	for inner, ctrl := range s.inner.Lock() {
 		// Skip if the lane was decommissioned by an epoch advance between the
 		// persist batch snapshot and this async callback: writing would recreate
-		// a bare, orphaned map entry the cleanup loop never reclaims.
-		if _, ok := inner.nextBlockToPersist[lane]; !ok {
+		// a bare, orphaned map entry the cleanup loop never reclaims. Gate on
+		// blocks[lane] (created per-lane in newInner, deleted only by
+		// advanceEpochLanes) — not nextBlockToPersist, which is populated lazily
+		// by this very function, so a missing entry there is normal first-write.
+		if _, ok := inner.blocks[lane]; !ok {
 			return
 		}
 		inner.nextBlockToPersist[lane] = next
