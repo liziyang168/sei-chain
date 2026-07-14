@@ -312,6 +312,11 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 		setupRoad = loadedQCs[n-1].QC().Proposal().Index() + 1
 	}
 	cfg.Registry.SetupInitialTrio(setupRoad)
+	// SetupInitialTrio seeds only {N-2..N+1} around the tip. The EpochAt loop
+	// below therefore assumes the loaded CommitQC WAL never spans more than ~3
+	// epochs behind that tip. Today that holds because the WAL is pruned against
+	// the latest AppQC (lag << EpochLength); if retention ever grows, seed from
+	// the earliest loaded QC's epoch as well (or fail closed here).
 	// Restore QCs. insertQC handles partially pruned QCs (range starts
 	// before inner.first) by skipping the pruned prefix.
 	for _, qc := range loadedQCs {
