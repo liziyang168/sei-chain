@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
@@ -161,6 +160,10 @@ type inner struct {
 	// RetainHeight pruning, making this in-memory index obsolete.
 	blockHashes map[types.BlockHeaderHash]types.GlobalBlockNumber
 
+	// epochTrio is this layer's Prev/Current/Next window. Store only under
+	// Watch.Lock; readers use State.epochTrio (AtomicRecv).
+	epochTrio utils.AtomicSend[types.EpochTrio]
+
 	// first <= nextAppProposal <= nextBlockToPersist <= nextBlock <= nextQC
 	//
 	// This invariant guarantees no race between pruning and persisting:
@@ -277,14 +280,10 @@ func (i *inner) pruneFirst(now time.Time, m *metrics.Metrics) {
 // State of the chain.
 // Contains blocks in global order and proofs of their finality.
 type State struct {
-	cfg     *Config
-	metrics *metrics.Metrics
-	inner   utils.Watch[*inner]
-	// epochTrio is a snapshot of the registry window centered on the epoch of
-	// the latest CommitQC. Refreshed inside the PushQC lock whenever a CommitQC
-	// crosses an epoch boundary. EvmProxy reads epochTrio.Current.Committee()
-	// to forward user transactions to the correct validators.
-	epochTrio atomic.Pointer[types.EpochTrio]
+	cfg       *Config
+	metrics   *metrics.Metrics
+	inner     utils.Watch[*inner]
+	epochTrio utils.AtomicRecv[types.EpochTrio] // Load-only view of inner.epochTrio; EvmProxy reads via EpochTrio()
 	dataWAL   *DataWAL
 }
 
@@ -372,14 +371,14 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init epochTrio: %w", err)
 	}
-	s := &State{
-		cfg:     cfg,
-		metrics: metrics.Get(),
-		inner:   utils.NewWatch(inner),
-		dataWAL: dataWAL,
-	}
-	s.epochTrio.Store(&initTrio)
-	return s, nil
+	inner.epochTrio = utils.NewAtomicSend(initTrio)
+	return &State{
+		cfg:       cfg,
+		metrics:   metrics.Get(),
+		inner:     utils.NewWatch(inner),
+		epochTrio: inner.epochTrio.Subscribe(),
+		dataWAL:   dataWAL,
+	}, nil
 }
 
 // Registry returns the epoch registry.
@@ -388,13 +387,13 @@ func (s *State) Registry() *epoch.Registry { return s.cfg.Registry }
 // EpochTrio returns a snapshot of the current epoch window. Returned by value
 // so callers (e.g. EvmProxy) get an immutable point-in-time view; they must
 // call again to observe a boundary advance rather than caching the result.
-func (s *State) EpochTrio() types.EpochTrio { return *s.epochTrio.Load() }
+func (s *State) EpochTrio() types.EpochTrio { return s.epochTrio.Load() }
 
 // PushQC pushes FullCommitQC and a subset of blocks that were finalized by it.
 // Pushing the qc and blocks is atomic, so that no unnecessary GetBlock RPCs are issued.
 // Even if the qc was already pushed earlier, the blocks are pushed anyway.
 func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*types.Block) error {
-	// epochTrio is updated atomically inside the lock at epoch boundaries.
+	// inner.epochTrio is updated under the lock at epoch boundaries.
 	// EpochForRoad searches the Prev/Current/Next window. A QC more than one
 	// epoch behind Current has its blocks below the prune cursor and would be
 	// a no-op even if accepted, so erroring out here is correct.
@@ -473,7 +472,7 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 				inner.nextQC += 1
 			}
 			if applied && nextTrio != nil {
-				s.epochTrio.Store(nextTrio)
+				inner.epochTrio.Store(*nextTrio)
 			}
 			ctrl.Updated()
 		}

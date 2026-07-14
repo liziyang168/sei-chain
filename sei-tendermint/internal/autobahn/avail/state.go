@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/avail/metrics"
@@ -35,7 +34,7 @@ type State struct {
 	key       types.SecretKey
 	data      *data.State
 	inner     utils.Watch[*inner]
-	epochTrio atomic.Pointer[types.EpochTrio]
+	epochTrio utils.AtomicRecv[types.EpochTrio] // Load-only view of inner.epochTrio
 
 	// persisters groups all disk persistence components.
 	// Always initialized: real when stateDir is set, no-op otherwise.
@@ -176,14 +175,13 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 	if err != nil {
 		return nil, err
 	}
-	finalTrio := startTrio
 	if inner.commitQCs.next > startTrio.Current.RoadRange().Last {
 		nextTrio, err := data.Registry().TrioAt(inner.commitQCs.next)
 		if err != nil {
 			return nil, fmt.Errorf("TrioAt(%d): %w", inner.commitQCs.next, err)
 		}
 		inner.advanceEpochLanes(nextTrio)
-		finalTrio = nextTrio
+		inner.epochTrio.Store(nextTrio)
 	}
 
 	// Truncate WAL entries below the prune anchor that were filtered out by
@@ -206,14 +204,13 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		}
 	}
 
-	s := &State{
+	return &State{
 		key:        key,
 		data:       data,
 		inner:      utils.NewWatch(inner),
+		epochTrio:  inner.epochTrio.Subscribe(),
 		persisters: pers,
-	}
-	s.epochTrio.Store(&finalTrio)
-	return s, nil
+	}, nil
 }
 
 func (s *State) FirstCommitQC() types.RoadIndex {
@@ -350,7 +347,7 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		// check above), so this branch runs once per epoch transition.
 		if nextTrio != nil {
 			inner.advanceEpochLanes(*nextTrio)
-			s.epochTrio.Store(nextTrio)
+			inner.epochTrio.Store(*nextTrio)
 			// The trailing ctrl.Updated() below is the ONLY wake that surfaces
 			// laneQCs already at quorum in the incoming Current (old Next) epoch:
 			// pushVote credited those votes silently (it notifies only for the

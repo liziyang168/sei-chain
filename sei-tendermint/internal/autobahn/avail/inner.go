@@ -18,6 +18,7 @@ import (
 type inner struct {
 	latestAppQC    utils.Option[*types.AppQC]
 	latestCommitQC utils.AtomicSend[utils.Option[*types.CommitQC]]
+	epochTrio      utils.AtomicSend[types.EpochTrio] // Store under Lock; State holds Recv
 	appVotes       *queue[types.GlobalBlockNumber, appVotes]
 	commitQCs      *queue[types.RoadIndex, *types.CommitQC]
 	blocks         map[types.LaneID]*queue[types.BlockNumber, *types.Signed[*types.LaneProposal]]
@@ -68,6 +69,7 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 	i := &inner{
 		latestAppQC:         utils.None[*types.AppQC](),
 		latestCommitQC:      utils.NewAtomicSend(utils.None[*types.CommitQC]()),
+		epochTrio:           utils.NewAtomicSend(startEpochTrio),
 		appVotes:            newQueue[types.GlobalBlockNumber, appVotes](),
 		commitQCs:           newQueue[types.RoadIndex, *types.CommitQC](),
 		blocks:              blocks,
