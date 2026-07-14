@@ -12,6 +12,7 @@ import (
 	"golang.org/x/time/rate"
 
 	atypes "github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
+	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/epoch"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/autobahn/producer"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/p2p/conn"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/internal/proxy"
@@ -187,6 +188,11 @@ func TestGigaRouter_FinalizeBlocks(t *testing.T) {
 			}
 			require.Equal(t, gb.Payload.Txs(), rbBytes, "router[0].BlockByNumber(%v).Block.Data.Txs ≠ data.GlobalBlock(%v).Payload.Txs", h, h)
 		}
+		// executeBlock seeds epoch N+2 from the executed CommitQC road (AdvanceIfNeeded).
+		// Registry starts with only {0,1} from SetupInitialTrio(0); after any epoch-0
+		// execution, epoch 2 must be present.
+		_, err := giga0.data.Registry().EpochAt(2 * epoch.EpochLength)
+		require.NoError(t, err, "executeBlock should AdvanceIfNeeded so epoch 2 is registered")
 		return nil
 	})
 	require.NoError(t, err)
