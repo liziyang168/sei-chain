@@ -89,12 +89,7 @@ func NewState(cfg *Config, data *data.State) (*State, error) {
 		pers = utils.Some(p)
 		persistedData = d
 	}
-	s, err := newState(cfg, data, pers, persistedData)
-	if err != nil {
-		return nil, err
-	}
-	data.Registry().SealSeeding()
-	return s, nil
+	return newState(cfg, data, pers, persistedData)
 }
 
 // newState is the internal constructor exposed for tests that need to inject

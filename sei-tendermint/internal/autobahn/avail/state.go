@@ -166,6 +166,8 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 			startRoadIdx = anchor.CommitQC.Proposal().Index()
 		}
 	}
+	// Epochs for this road must already be present: data.NewState peeks its
+	// CommitQC WAL and calls SetupInitialTrio before avail is constructed.
 	startTrio, err := data.Registry().TrioAt(startRoadIdx)
 	if err != nil {
 		return nil, fmt.Errorf("TrioAt(%d): %w", startRoadIdx, err)

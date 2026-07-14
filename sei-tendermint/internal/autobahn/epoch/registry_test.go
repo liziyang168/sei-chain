@@ -56,16 +56,14 @@ func TestEpochAt_WithinGenesisEpoch(t *testing.T) {
 
 func TestEpochAt_ErrorIfNotRegistered(t *testing.T) {
 	r, _ := makeRegistry(t)
-	r.SealSeeding()
-	_, err := r.EpochAt(EpochLength)
+	_, err := r.EpochAt(2 * EpochLength)
 	if err == nil {
-		t.Fatal("EpochAt(EpochLength) expected error for unregistered epoch, got nil")
+		t.Fatal("EpochAt(2*EpochLength) expected error for unregistered epoch, got nil")
 	}
 }
 
 func TestEpochAt_FoundAfterAdvanceIfNeeded(t *testing.T) {
 	r, _ := makeRegistry(t)
-	r.SealSeeding()
 	// Executing any block in epoch 0 seeds epoch 2 (N+2).
 	r.AdvanceIfNeeded(EpochLength - 1)
 	ep, err := r.EpochAt(2 * EpochLength)
@@ -77,56 +75,24 @@ func TestEpochAt_FoundAfterAdvanceIfNeeded(t *testing.T) {
 	}
 }
 
-func TestSeeding_AutoGeneratesEpochs(t *testing.T) {
+func TestSetupInitialTrio_WindowAroundTip(t *testing.T) {
 	r, _ := makeRegistry(t)
-	for _, idx := range []types.EpochIndex{4, 5, 6} {
+	// N=5 → {3,4,5,6}. Epochs 0,1 already present from NewRegistry.
+	r.SetupInitialTrio(5 * EpochLength)
+	for _, idx := range []types.EpochIndex{3, 4, 5, 6} {
 		ep, err := r.EpochAt(types.RoadIndex(idx) * EpochLength)
 		if err != nil {
-			t.Fatalf("EpochAt(epoch %d) failed during seeding: %v", idx, err)
+			t.Fatalf("EpochAt(epoch %d) after SetupInitialTrio: %v", idx, err)
 		}
 		if ep.EpochIndex() != idx {
 			t.Fatalf("EpochAt(epoch %d).EpochIndex() = %d, want %d", idx, ep.EpochIndex(), idx)
 		}
 	}
-}
-
-func TestSeeding_DoesNotOverwriteExisting(t *testing.T) {
-	r, _ := makeRegistry(t)
-	genesis, _ := r.EpochAt(0)
-	after, _ := r.EpochAt(0)
-	if genesis != after {
-		t.Fatal("seeding phase overwrote existing genesis epoch")
+	if _, err := r.EpochAt(2 * EpochLength); err == nil {
+		t.Fatal("EpochAt(epoch 2) should not be present after SetupInitialTrio(5*EpochLength)")
 	}
-}
-
-func TestAdvanceIfNeeded_SeedsNextNext(t *testing.T) {
-	r, _ := makeRegistry(t)
-	r.SealSeeding()
-	// Epoch 0 execution seeds epoch 2, not epoch 1.
-	r.AdvanceIfNeeded(0)
-	if _, err := r.EpochAt(2 * EpochLength); err != nil {
-		t.Fatalf("EpochAt(epoch 2) after AdvanceIfNeeded(epoch 0): %v", err)
-	}
-	if _, err := r.EpochAt(EpochLength); err == nil {
-		t.Fatal("EpochAt(epoch 1) should not be seeded by AdvanceIfNeeded(epoch 0) after sealing")
-	}
-}
-
-func TestSeeding_LatestNotAdvanced(t *testing.T) {
-	r, _ := makeRegistry(t)
-	_, _ = r.EpochAt(5 * EpochLength)
-	latest := r.LatestEpoch()
-	if latest.EpochIndex() != 0 {
-		t.Fatalf("LatestEpoch().EpochIndex() = %d after seeding, want 0", latest.EpochIndex())
-	}
-}
-
-func TestSealSeeding_BlocksAutoGenerate(t *testing.T) {
-	r, _ := makeRegistry(t)
-	r.SealSeeding()
-	_, err := r.EpochAt(5 * EpochLength)
-	if err == nil {
-		t.Fatal("EpochAt should return error after SealSeeding for unregistered epoch")
+	if _, err := r.EpochAt(7 * EpochLength); err == nil {
+		t.Fatal("EpochAt(epoch 7) should not be present after SetupInitialTrio(5*EpochLength)")
 	}
 }
 
@@ -151,7 +117,7 @@ func TestTrioAt_GenesisEpoch(t *testing.T) {
 
 func TestTrioAt_MiddleEpoch(t *testing.T) {
 	r, _ := makeRegistry(t)
-	// During seeding, EpochAt auto-generates missing epochs when TrioAt looks them up.
+	r.SetupInitialTrio(2 * EpochLength)
 	trio, err := r.TrioAt(2 * EpochLength)
 	if err != nil {
 		t.Fatalf("TrioAt(epoch 2) error: %v", err)
@@ -168,12 +134,22 @@ func TestTrioAt_MiddleEpoch(t *testing.T) {
 	}
 }
 
-func TestTrioAt_ErrorWhenNextMissingAfterSealing(t *testing.T) {
-	r, _ := makeRegistry(t)
-	r.SealSeeding()
-	// epoch 0 is present but epoch 1 is not — TrioAt should error.
-	_, err := r.TrioAt(0)
+func TestTrioAt_ErrorWhenNextMissing(t *testing.T) {
+	// SetupInitialTrio always seeds Next, so leave a hole by building a bare
+	// registry with only epoch 0 (skipping NewRegistry's SetupInitialTrio(0)).
+	committee := utils.OrPanic1(types.NewCommittee(map[types.PublicKey]uint64{
+		types.GenSecretKey(utils.TestRng()).Public(): 1,
+	}))
+	ep := types.NewEpoch(0, types.RoadRange{First: 0, Last: EpochLength - 1}, time.Time{}, committee, 0)
+	bare := &Registry{
+		state: utils.NewRWMutex(&registryState{
+			m:      map[types.EpochIndex]*types.Epoch{0: ep},
+			latest: 0,
+		}),
+		highestEpoch: utils.NewAtomicSend(types.EpochIndex(0)),
+	}
+	_, err := bare.TrioAt(0)
 	if err == nil {
-		t.Fatal("TrioAt(0) expected error when Next epoch not registered after sealing, got nil")
+		t.Fatal("TrioAt(0) expected error when Next epoch not registered, got nil")
 	}
 }

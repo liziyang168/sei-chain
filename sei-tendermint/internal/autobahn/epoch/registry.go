@@ -13,9 +13,8 @@ import (
 const EpochLength types.RoadIndex = 108_000
 
 type registryState struct {
-	m       map[types.EpochIndex]*types.Epoch
-	latest  types.EpochIndex
-	seeding bool // true until SealSeeding is called
+	m      map[types.EpochIndex]*types.Epoch
+	latest types.EpochIndex
 }
 
 // Registry is the authoritative source of epoch and committee information.
@@ -29,21 +28,26 @@ type Registry struct {
 	highestEpoch utils.AtomicSend[types.EpochIndex]
 }
 
-// NewRegistry creates a Registry with the genesis committee.
+// NewRegistry creates a Registry with the genesis committee and seeds epoch 1
+// so TrioAt(0) succeeds on a fresh node.
 func NewRegistry(
 	committee *types.Committee,
 	firstBlock types.GlobalBlockNumber,
 	genesisTimestamp time.Time,
 ) (*Registry, error) {
 	ep := types.NewEpoch(0, types.RoadRange{First: 0, Last: EpochLength - 1}, genesisTimestamp, committee, firstBlock)
-	return &Registry{
+	r := &Registry{
 		state: utils.NewRWMutex(&registryState{
-			m:       map[types.EpochIndex]*types.Epoch{0: ep},
-			latest:  0,
-			seeding: true,
+			m:      map[types.EpochIndex]*types.Epoch{0: ep},
+			latest: 0,
 		}),
 		highestEpoch: utils.NewAtomicSend(types.EpochIndex(0)),
-	}, nil
+	}
+	// Fresh start needs Current+Next for TrioAt(0).
+	// TODO: in the future this information will be read from disk and verified
+	// (snapshots / state sync); until then seed a genesis placeholder trio.
+	r.SetupInitialTrio(0)
+	return r, nil
 }
 
 // WaitForEpoch blocks until epochIdx has been registered, or ctx is done.
@@ -70,20 +74,27 @@ func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) 
 	return err
 }
 
-// SealSeeding marks the end of the initialization seeding phase. After this
-// call, EpochAt will no longer auto-generate missing epochs; new epochs can
-// only be created via AdvanceIfNeeded (driven by block execution).
+// SetupInitialTrio registers placeholder epochs around roadIndex's epoch N:
+// N-2, N-1, N, and N+1 (clamped at 0). That covers TrioAt(roadIndex) (Current+Next)
+// and leaves room for a lagging startTrio (e.g. avail prune anchor) up to two
+// epochs behind the tip. Epochs already present are left unchanged. Placeholders
+// reuse the genesis committee.
 //
-// Must be called once, after all layers (data, avail, consensus) have finished
-// their NewState initialization.
-//
-// TODO: during the seeding phase, epochs are generated with the genesis
-// committee as a placeholder. Once epoch state is included in snapshots,
-// replace this with reconstruction from the snapshot so that restarted nodes
-// use the real per-epoch committees immediately.
-func (r *Registry) SealSeeding() {
+// Called from data.NewState after peeking the CommitQC WAL tip.
+func (r *Registry) SetupInitialTrio(roadIndex types.RoadIndex) {
+	n := types.EpochIndex(roadIndex / EpochLength)
+	first := types.EpochIndex(0)
+	if n >= 2 {
+		first = n - 2
+	}
+	last := n + 1
 	for s := range r.state.Lock() {
-		s.seeding = false
+		for idx := first; idx <= last; idx++ {
+			if _, ok := s.m[idx]; ok {
+				continue
+			}
+			_, _ = r.makeEpoch(s, idx) //nolint:errcheck // genesis always present
+		}
 	}
 }
 
@@ -97,36 +108,22 @@ func (r *Registry) FirstBlock() types.GlobalBlockNumber {
 }
 
 // EpochAt returns the epoch for the given road index.
-// During the seeding phase (before SealSeeding), missing epochs are
-// auto-generated with the genesis committee. After seeding, returns an error
-// if the epoch has not been registered via AdvanceIfNeeded.
+// Returns an error if the epoch has not been registered via SetupInitialTrio or
+// AdvanceIfNeeded.
 func (r *Registry) EpochAt(roadIndex types.RoadIndex) (*types.Epoch, error) {
 	epochIdx := types.EpochIndex(roadIndex / EpochLength)
-	// Fast path: read lock covers the common post-seal case.
 	for s := range r.state.RLock() {
 		if ep, ok := s.m[epochIdx]; ok {
 			return ep, nil
 		}
-		if !s.seeding {
-			return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
-		}
-	}
-	// Slow path: seeding phase with a missing epoch — create under write lock.
-	for s := range r.state.Lock() {
-		if ep, ok := s.m[epochIdx]; ok {
-			return ep, nil // re-check after acquiring write lock
-		}
-		ep, _ := r.makeEpoch(s, epochIdx) //nolint:errcheck // genesis always present
-		if ep == nil {
-			return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
-		}
-		return ep, nil
+		return nil, fmt.Errorf("epoch %d (road %d) not registered", epochIdx, roadIndex)
 	}
 	panic("unreachable")
 }
 
 // makeEpoch constructs a new epoch at epochIdx using the genesis committee and
-// inserts it into s. Caller must hold the write lock.
+// inserts it into s. Caller must hold the write lock. Overwrites if present;
+// callers that must not clobber should check existence first.
 // Note: does NOT advance s.latest.
 func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*types.Epoch, error) {
 	genesis, ok := s.m[0]
@@ -150,10 +147,10 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 //
 // Seeding model: execution of any block in epoch N seeds epoch N+2 as a
 // placeholder (genesis committee). Epoch N+1 is seeded by executing epoch N-1
-// blocks (same rule applied one epoch earlier). At the epoch boundary
-// avail.PushCommitQC needs TrioAt(N.Last+1), which requires N+2 as Next; if a
-// node's CommitQC stream has outrun its execution and N+2 is not yet seeded, it
-// blocks on WaitForEpoch until execution seeds it here.
+// blocks (same rule applied one epoch earlier), or by SetupInitialTrio at startup.
+// At the epoch boundary avail.PushCommitQC needs TrioAt(N.Last+1), which requires
+// N+2 as Next; if a node's CommitQC stream has outrun its execution and N+2 is
+// not yet seeded, it blocks on WaitForEpoch until execution seeds it here.
 //
 // TODO: real committee rotation — pass the derived committee for N+2 here once
 // the execution layer computes it from the last block of epoch N.

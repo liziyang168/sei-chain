@@ -303,9 +303,19 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	if dataFirst > cfg.Registry.FirstBlock() {
 		inner.skipTo(dataFirst)
 	}
+	// Seed a placeholder trio from the WAL tip so QC verify and TrioAt(initRoad)
+	// succeed.
+	// TODO: in the future this information will be read from disk and verified
+	// (snapshots / state sync); until then derive the tip from the CommitQC WAL.
+	loadedQCs := dataWAL.CommitQCs.ConsumeLoaded()
+	setupRoad := types.RoadIndex(0)
+	if n := len(loadedQCs); n > 0 {
+		setupRoad = loadedQCs[n-1].QC().Proposal().Index() + 1
+	}
+	cfg.Registry.SetupInitialTrio(setupRoad)
 	// Restore QCs. insertQC handles partially pruned QCs (range starts
 	// before inner.first) by skipping the pruned prefix.
-	for _, qc := range dataWAL.CommitQCs.ConsumeLoaded() {
+	for _, qc := range loadedQCs {
 		ep, err := cfg.Registry.EpochAt(qc.QC().Proposal().Index())
 		if err != nil {
 			return nil, fmt.Errorf("load QC from WAL: epoch lookup: %w", err)

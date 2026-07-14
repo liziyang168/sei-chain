@@ -21,12 +21,6 @@ func NewGigaFullnodeRouter(cfg *GigaRouterCommonConfig, key NodeSecretKey) (*gig
 	if err != nil {
 		return nil, err
 	}
-	// Seal seeding once all layers are constructed. On a fullnode data.State is
-	// the only seeding consumer (no avail/consensus layer), so this is the last
-	// point that needs the registry to auto-generate WAL-replay epochs. On the
-	// validator path the equivalent seal lives in consensus.NewState, which
-	// constructs the final (avail) layer.
-	dataState.Registry().SealSeeding()
 	logger.Info("GigaRouter initialized (fullnode)", "validators", len(cfg.ValidatorAddrs), "dial_interval", cfg.DialInterval, "inbound_fullnode_cap", cfg.MaxInboundFullnodePeers)
 	return &gigaFullnodeRouter{
 		gigaRouterCommon: newGigaRouterCommon(cfg, key, dataState, giga.NewBlockSyncService(dataState)),
