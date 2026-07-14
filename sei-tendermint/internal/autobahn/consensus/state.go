@@ -174,7 +174,19 @@ func (s *State) PushTimeoutQC(ctx context.Context, qc *types.TimeoutQC) error {
 
 // PushPrepareVote processes an unverified Prepare vote message.
 func (s *State) PushPrepareVote(vote *types.Signed[*types.PrepareVote]) error {
-	committee := s.myView.Load().Epoch.Committee()
+	// Resolve the committee from the vote's own epoch. innerRecv holds the
+	// authoritative current epoch (rotated synchronously by pushCommitQC); a vote
+	// for any other epoch is stale or premature, so drop it and move on rather
+	// than verifying it against the wrong committee (which would fail and tear
+	// down the peer's consensus stream). The vote is re-delivered once this node
+	// is in that epoch.
+	i := s.innerRecv.Load()
+	if voteEp := vote.Msg().Proposal().View().EpochIndex; voteEp != i.epoch.EpochIndex() {
+		logger.Debug("dropping prepare vote for non-current epoch",
+			"vote_epoch", uint64(voteEp), "current_epoch", uint64(i.epoch.EpochIndex()))
+		return nil
+	}
+	committee := i.epoch.Committee()
 	if err := vote.VerifySig(committee); err != nil {
 		return fmt.Errorf("vote.VerifySig(): %w", err)
 	}
@@ -186,7 +198,14 @@ func (s *State) PushPrepareVote(vote *types.Signed[*types.PrepareVote]) error {
 
 // PushCommitVote processes an unverified CommitVote message.
 func (s *State) PushCommitVote(vote *types.Signed[*types.CommitVote]) error {
-	committee := s.myView.Load().Epoch.Committee()
+	// See PushPrepareVote: drop votes for a non-current epoch instead of failing.
+	i := s.innerRecv.Load()
+	if voteEp := vote.Msg().Proposal().View().EpochIndex; voteEp != i.epoch.EpochIndex() {
+		logger.Debug("dropping commit vote for non-current epoch",
+			"vote_epoch", uint64(voteEp), "current_epoch", uint64(i.epoch.EpochIndex()))
+		return nil
+	}
+	committee := i.epoch.Committee()
 	if err := vote.VerifySig(committee); err != nil {
 		return fmt.Errorf("vote.VerifySig(): %w", err)
 	}
@@ -198,7 +217,14 @@ func (s *State) PushCommitVote(vote *types.Signed[*types.CommitVote]) error {
 
 // PushTimeoutVote processes an unverified FullTimeoutVote message.
 func (s *State) PushTimeoutVote(vote *types.FullTimeoutVote) error {
-	ep := s.myView.Load().Epoch
+	// See PushPrepareVote: drop votes for a non-current epoch instead of failing.
+	i := s.innerRecv.Load()
+	if voteEp := vote.View().EpochIndex; voteEp != i.epoch.EpochIndex() {
+		logger.Debug("dropping timeout vote for non-current epoch",
+			"vote_epoch", uint64(voteEp), "current_epoch", uint64(i.epoch.EpochIndex()))
+		return nil
+	}
+	ep := i.epoch
 	if err := vote.Verify(ep); err != nil {
 		return fmt.Errorf("vote.Verify(): %w", err)
 	}

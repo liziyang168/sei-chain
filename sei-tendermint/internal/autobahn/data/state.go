@@ -425,6 +425,29 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 			return fmt.Errorf("b.Verify(): %w", err)
 		}
 	}
+	// If this QC closes the current epoch, resolve the next trio before taking
+	// the lock and before mutating nextQC — mirroring avail.PushCommitQC. The
+	// fast path is a plain TrioAt; only if N+2 hasn't been seeded yet do we block
+	// on WaitForEpoch (off the lock) until execution seeds it, then retry.
+	// Resolving it up front means a lookup failure can never leave nextQC
+	// advanced past a boundary we didn't finish, which would strand epochTrio at
+	// the old epoch (the boundary block runs only when needQC, i.e. once).
+	idx := qc.QC().Proposal().Index()
+	var nextTrio *types.EpochTrio
+	if needQC && idx == s.epochTrio.Load().Current.RoadRange().Last {
+		cur := s.epochTrio.Load().Current
+		nt, err := s.cfg.Registry.TrioAt(idx + 1)
+		if err != nil {
+			if err := s.cfg.Registry.WaitForEpoch(ctx, cur.EpochIndex()+2); err != nil {
+				return err
+			}
+			nt, err = s.cfg.Registry.TrioAt(idx + 1)
+			if err != nil {
+				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
+			}
+		}
+		nextTrio = &nt
+	}
 	// Atomically insert QC and blocks.
 	for inner, ctrl := range s.inner.Lock() {
 		if needQC {
@@ -432,13 +455,8 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 				inner.qcs[inner.nextQC] = qc
 				inner.nextQC += 1
 			}
-			idx := qc.QC().Proposal().Index()
-			if idx == s.epochTrio.Load().Current.RoadRange().Last {
-				nextTrio, err := s.cfg.Registry.TrioAt(idx + 1)
-				if err != nil {
-					return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
-				}
-				s.epochTrio.Store(&nextTrio)
+			if nextTrio != nil {
+				s.epochTrio.Store(nextTrio)
 			}
 			ctrl.Updated()
 		}
