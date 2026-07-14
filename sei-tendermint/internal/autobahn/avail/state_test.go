@@ -179,7 +179,7 @@ func testState(t *testing.T, stateDir utils.Option[string]) {
 			}
 
 			t.Logf("Check that a CommitQC was successfully reconstructed.")
-			got, err := state.fullCommitQC(ctx, qc.Proposal().Index())
+			got, _, err := state.fullCommitQC(ctx, qc.Proposal().Index())
 			if err != nil {
 				return fmt.Errorf("state.fullCommitQC(): %w", err)
 			}

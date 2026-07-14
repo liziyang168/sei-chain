@@ -215,23 +215,11 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 		if i.View() != proposal.View() || i.TimeoutVote.IsPresent() || i.PrepareVote.IsPresent() {
 			return nil
 		}
-		// At the midpoint of epoch N, gate on epoch N+2 being seeded in the registry.
-		// AdvanceIfNeeded (called by executeBlock) seeds N+2 on every executed block
-		// in epoch N, so the gate is satisfied as soon as any block in epoch N has
-		// been executed. This ensures TrioAt(N.Last+1) — called at the epoch boundary
-		// in data and avail — always finds N+2 as Next without erroring.
-		// Note: this is a best-effort gate for actively-voting nodes. A node that
-		// catches up past the midpoint via CommitQC sync (without processing the
-		// midpoint proposal) bypasses the check; that is acceptable because such a
-		// node has already executed enough blocks to seed N+2 anyway.
-		if proposal.Proposal().Msg().Index() == i.epoch.RoadRange().MidPoint() {
-			if _, err := i.registry.EpochAt(types.RoadIndex(i.epoch.EpochIndex()+2) * epoch.EpochLength); err != nil {
-				logger.Error("refusing PrepareVote: epoch N+2 not yet seeded at epoch midpoint",
-					"road", proposal.Proposal().Msg().Index(),
-					"missing", i.epoch.EpochIndex()+2)
-				return nil
-			}
-		}
+		// No epoch-seeding gate is needed here: avail.PushCommitQC blocks
+		// (WaitForEpoch) until the next epoch's committee is seeded before it
+		// advances the trio at a boundary, so consensus can vote freely and a node
+		// whose execution lags simply stalls at the boundary rather than racing
+		// ahead of seeding.
 		v := types.Sign(s.cfg.Key, types.NewPrepareVote(proposal.Proposal().Msg()))
 		i.PrepareVote = utils.Some(v)
 		isend.Store(i)

@@ -1,6 +1,7 @@
 package epoch
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -21,6 +22,11 @@ type registryState struct {
 // All layers (consensus, data, avail) read from it.
 type Registry struct {
 	state utils.RWMutex[*registryState]
+	// highestEpoch is the highest epoch index registered so far. It only ever
+	// increases (epochs are registered contiguously from the current operating
+	// point), so WaitForEpoch can block until it reaches a target index. Kept
+	// separate from state so the RLock read fast-path on state is preserved.
+	highestEpoch utils.AtomicSend[types.EpochIndex]
 }
 
 // NewRegistry creates a Registry with the genesis committee.
@@ -36,7 +42,26 @@ func NewRegistry(
 			latest:  0,
 			seeding: true,
 		}),
+		highestEpoch: utils.NewAtomicSend(types.EpochIndex(0)),
 	}, nil
+}
+
+// WaitForEpoch blocks until epochIdx has been registered, or ctx is done.
+// Epochs are registered contiguously from the current operating point, so once
+// highestEpoch reaches epochIdx, epochIdx itself is present. Used at an epoch
+// boundary: a node whose CommitQC stream has outrun its own block execution
+// (which seeds new epochs via AdvanceIfNeeded) waits here rather than failing,
+// and unblocks once execution catches up.
+//
+// CALLER CONTRACT: only block execution (AdvanceIfNeeded -> makeEpoch) advances
+// highestEpoch and wakes this wait, so callers MUST NOT hold any lock on that path —
+// notably the avail/data inner lock — or the wake can never fire. WaitForEpoch
+// itself holds no registry lock while blocked (it waits on the highestEpoch channel).
+func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) error {
+	_, err := r.highestEpoch.Subscribe().Wait(ctx, func(highest types.EpochIndex) bool {
+		return highest >= epochIdx
+	})
+	return err
 }
 
 // SealSeeding marks the end of the initialization seeding phase. After this
@@ -106,6 +131,11 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 	lastRoad := firstRoad + EpochLength - 1
 	epoch := types.NewEpoch(epochIdx, types.RoadRange{First: firstRoad, Last: lastRoad}, genesis.FirstTimestamp(), genesis.Committee(), genesis.FirstBlock())
 	s.m[epochIdx] = epoch
+	// Wake WaitForEpoch waiters. makeEpoch runs under the write lock, so this
+	// Load/Store is serialized; highestEpoch only advances.
+	if epochIdx > r.highestEpoch.Load() {
+		r.highestEpoch.Store(epochIdx)
+	}
 	return epoch, nil
 }
 
@@ -114,9 +144,10 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 //
 // Seeding model: execution of any block in epoch N seeds epoch N+2 as a
 // placeholder (genesis committee). Epoch N+1 is seeded by executing epoch N-1
-// blocks (same rule applied one epoch earlier). The midpoint liveness gate
-// (consensus/inner.go) checks that N+2 is present before voting at MidPoint(N),
-// ensuring TrioAt(N.Last+1) — which needs N+2 as Next — always succeeds.
+// blocks (same rule applied one epoch earlier). At the epoch boundary
+// avail.PushCommitQC needs TrioAt(N.Last+1), which requires N+2 as Next; if a
+// node's CommitQC stream has outrun its execution and N+2 is not yet seeded, it
+// blocks on WaitForEpoch until execution seeds it here.
 //
 // TODO: real committee rotation — pass the derived committee for N+2 here once
 // the execution layer computes it from the last block of epoch N.

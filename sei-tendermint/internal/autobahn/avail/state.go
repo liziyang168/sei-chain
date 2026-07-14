@@ -298,28 +298,57 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 	// A road outside the window can only be below it (in-order processing via
 	// waitForCommitQC bounds how far ahead idx can be), i.e. a QC we already
 	// committed, so it is not needed — skip it like the stale case below.
-	ep, err := s.epochTrio.Load().EpochForRoad(idx)
+	trio := s.epochTrio.Load()
+	ep, err := trio.EpochForRoad(idx)
 	if err != nil {
+		logger.Info("dropping stale CommitQC: road outside epoch window",
+			slog.Uint64("road", uint64(idx)), "err", err)
 		return nil
 	}
 	if err := qc.Verify(ep); err != nil {
 		return fmt.Errorf("qc.Verify(): %w", err)
 	}
+
+	// If this QC closes the current epoch, resolve the next trio before taking
+	// the inner lock. Almost always epoch N+2 (the incoming trio's Next) is
+	// already seeded by the time the boundary QC arrives, so the plain TrioAt
+	// fast path succeeds. Only if it hasn't been seeded — a node whose CommitQC
+	// stream has outrun its own block execution (which seeds epochs via
+	// AdvanceIfNeeded) — do we block until execution catches up, then retry.
+	//
+	// While blocked in WaitForEpoch, the ONLY thing paused is CommitQC ingest:
+	// this goroutine (storeCommitQC, or the CommitQC stream reader on a catch-up
+	// node) stops, and the next PushCommitQC queues behind it on waitForCommitQC.
+	// No lock is held, and every other goroutine keeps running — crucially the
+	// avail pusher (fullCommitQC -> data.PushQC), data persistence, and
+	// runExecute. Execution processes the epoch-N roads already below N.Last
+	// (whose CommitQCs were ingested before this one), seeds N+2, and wakes us.
+	// So the wait is bounded by execution, never deadlocked on it.
+	var nextTrio *types.EpochTrio
+	if idx == trio.Current.RoadRange().Last {
+		reg := s.data.Registry()
+		nt, err := reg.TrioAt(idx + 1)
+		if err != nil {
+			if err := reg.WaitForEpoch(ctx, trio.Current.EpochIndex()+2); err != nil {
+				return err
+			}
+			nt, err = reg.TrioAt(idx + 1)
+			if err != nil {
+				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
+			}
+		}
+		nextTrio = &nt
+	}
+
 	for inner, ctrl := range s.inner.Lock() {
 		if idx != inner.commitQCs.next {
 			return nil
 		}
-		// At an epoch boundary, rotate the lane set to the next epoch.
-		// N+2 is seeded by executeBlock (AdvanceIfNeeded) on every block in epoch N,
-		// so it is present well before the boundary CommitQC arrives. A miss here
-		// is a registry bug — fail loudly rather than continuing with stale state.
-		if idx == s.epochTrio.Load().Current.RoadRange().Last {
-			nextTrio, err := s.data.Registry().TrioAt(idx + 1)
-			if err != nil {
-				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
-			}
-			inner.advanceEpochLanes(nextTrio)
-			s.epochTrio.Store(&nextTrio)
+		// nextTrio is non-nil iff this QC closed the current epoch (the boundary
+		// check above), so this branch runs once per epoch transition.
+		if nextTrio != nil {
+			inner.advanceEpochLanes(*nextTrio)
+			s.epochTrio.Store(nextTrio)
 			// The trailing ctrl.Updated() below is the ONLY wake that surfaces
 			// laneQCs already at quorum in the incoming Current (old Next) epoch:
 			// pushVote credited those votes silently (it notifies only for the
@@ -343,7 +372,14 @@ func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]
 	idx := v.Msg().Proposal().RoadIndex()
 	ep, err := s.epochTrio.Load().EpochForRoad(idx)
 	if err != nil {
-		return fmt.Errorf("EpochForRoad(%d): %w", idx, err)
+		// A needed AppVote is for a road at or below the CommitQC frontier and no
+		// more than one epoch behind it, hence in-window. A miss here means the
+		// road has fallen out of the window — a stale/superseded vote a lagging
+		// peer is still broadcasting. Drop it rather than erroring, which would
+		// tear down the whole peer connection (all streams, not just AppVotes).
+		logger.Info("dropping stale AppVote: road outside epoch window",
+			slog.Uint64("road", uint64(idx)), "err", err)
+		return nil
 	}
 	committee := ep.Committee()
 	if err := v.VerifySig(committee); err != nil {
@@ -596,11 +632,14 @@ func (s *State) headers(ctx context.Context, lr *types.LaneRange) ([]*types.Bloc
 	return headers, nil
 }
 
-func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.FullCommitQC, error) {
+// fullCommitQC returns the FullCommitQC for road n along with the epoch that
+// signed it, so callers can reuse the resolved epoch without a second lookup
+// (which could race the epoch window and fail on the same road).
+func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.FullCommitQC, *types.Epoch, error) {
 	// Collect the CommitQC.
 	qc, err := s.CommitQC(ctx, n)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Collect the headers from the votes.
 	var commitHeaders []*types.BlockHeader
@@ -609,16 +648,16 @@ func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.Ful
 		// The epoch window can advance twice between CommitQC() returning and this
 		// lookup, dropping this QC's road below the window. Its blocks are then
 		// below the prune cursor, so treat it as pruned (the caller skips pruned QCs).
-		return nil, fmt.Errorf("epoch window advanced past road %d: %w", qc.Proposal().Index(), data.ErrPruned)
+		return nil, nil, fmt.Errorf("epoch window advanced past road %d: %w", qc.Proposal().Index(), data.ErrPruned)
 	}
 	for lane := range ep.Committee().Lanes().All() {
 		headers, err := s.headers(ctx, qc.LaneRange(lane))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		commitHeaders = append(commitHeaders, headers...)
 	}
-	return types.NewFullCommitQC(qc, commitHeaders), nil
+	return types.NewFullCommitQC(qc, commitHeaders), ep, nil
 }
 
 // WaitForLocalCapacity waits until the lane owned by this node has capacity for toProduce block.
@@ -710,7 +749,7 @@ func (s *State) Run(ctx context.Context) error {
 		// Task inserting FullCommitQCs and local blocks to data state.
 		scope.SpawnNamed("s.data.PushQC", func() error {
 			for n := types.RoadIndex(0); ; n = max(n+1, s.FirstCommitQC()) {
-				qc, err := s.fullCommitQC(ctx, n)
+				qc, ep, err := s.fullCommitQC(ctx, n)
 				if err != nil {
 					if errors.Is(err, data.ErrPruned) {
 						continue
@@ -718,11 +757,9 @@ func (s *State) Run(ctx context.Context) error {
 					return err
 				}
 
-				// Collect the blocks we have locally.
-				ep, err := s.epochTrio.Load().EpochForRoad(qc.QC().Proposal().Index())
-				if err != nil {
-					return fmt.Errorf("EpochForRoad(%d): %w", qc.QC().Proposal().Index(), err)
-				}
+				// Collect the blocks we have locally, using the same epoch
+				// fullCommitQC already resolved for this road (no second lookup,
+				// so no chance of the window racing past it here).
 				c := ep.Committee()
 				var blocks []*types.Block
 				for inner := range s.inner.Lock() {
