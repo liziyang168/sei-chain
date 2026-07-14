@@ -123,8 +123,12 @@ func newInner(data utils.Option[*pb.PersistedInner], registry *epoch.Registry) (
 	// persisted CommitQC must be verified against its own epoch, which differs
 	// from the view epoch when the CommitQC is on the last road of an epoch.
 	nextViewRoad := types.NextIndexOpt(persisted.CommitQC)
-	// Epochs for this road must already be present: data.NewState peeks its
-	// CommitQC WAL and calls SetupInitialTrio before consensus is constructed.
+	// data.NewState already SetupInitialTrio's from the data WAL tip. Consensus's
+	// persisted CommitQC can still lead that tip (avail advances before the async
+	// FullCommitQC→data.PushQC path), so seed around the consensus road as well.
+	// TODO: in the future this information will be read from disk and verified
+	// (snapshots / state sync); until then derive it from persisted CommitQC.
+	registry.SetupInitialTrio(nextViewRoad)
 	viewEpoch, err := registry.EpochAt(nextViewRoad)
 	if err != nil {
 		return inner{}, fmt.Errorf("EpochAt(%d): %w", nextViewRoad, err)
