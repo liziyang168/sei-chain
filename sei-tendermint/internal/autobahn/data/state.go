@@ -444,11 +444,11 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 	// the old epoch (the boundary block runs only when needQC, i.e. once).
 	idx := qc.QC().Proposal().Index()
 	var nextTrio *types.EpochTrio
-	if needQC && idx == s.epochTrio.Load().Current.RoadRange().Last {
-		cur := s.epochTrio.Load().Current
+	trio := s.epochTrio.Load()
+	if needQC && idx == trio.Current.RoadRange().Last {
 		nt, err := s.cfg.Registry.TrioAt(idx + 1)
 		if err != nil {
-			if err := s.cfg.Registry.WaitForEpoch(ctx, cur.EpochIndex()+2); err != nil {
+			if err := s.cfg.Registry.WaitForEpoch(ctx, trio.Current.EpochIndex()+2); err != nil {
 				return err
 			}
 			nt, err = s.cfg.Registry.TrioAt(idx + 1)
