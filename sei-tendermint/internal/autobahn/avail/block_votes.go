@@ -36,9 +36,12 @@ type blockVotes struct {
 	// have weight in a later epoch — the whole map is freed when the block
 	// number is pruned from the vote queue (inner.prune).
 	byKey map[types.PublicKey]*types.Signed[*types.LaneVote]
-	// byHash maps a block hash to its per-epoch vote sets. Every set is
-	// non-empty (created only when a weighted vote is appended), so headers()
-	// can recover the block header from any set's votes[0].
+	// byHash maps a block hash to its per-epoch vote sets. An entry exists only
+	// once a weighted vote has been credited (credit creates it lazily), so a
+	// present entry always has a non-empty set — headers() can recover the block
+	// header from any set's votes[0]. A vote that earns no weight in any epoch it
+	// is credited against (e.g. a signer valid only in a now-departed epoch)
+	// leaves no byHash entry; it lives only in byKey.
 	byHash map[types.BlockHeaderHash]map[types.EpochIndex]*laneVoteSet
 }
 
@@ -66,13 +69,6 @@ func (bv blockVotes) pushVote(eps []*types.Epoch, vote *types.Signed[*types.Lane
 	}
 	bv.byKey[k] = vote
 
-	// Ensure the per-epoch map exists so credit (shared with applyEpoch) can
-	// assume it.
-	h := vote.Msg().Header().Hash()
-	if _, ok := bv.byHash[h]; !ok {
-		bv.byHash[h] = map[types.EpochIndex]*laneVoteSet{}
-	}
-
 	notify := false
 	for i, ep := range eps {
 		// Notify only for the current epoch (eps[0]).
@@ -85,15 +81,21 @@ func (bv blockVotes) pushVote(eps []*types.Epoch, vote *types.Signed[*types.Lane
 
 // credit adds vote to ep's set for the vote's block hash and returns whether
 // ep's set newly reached quorum. A no-op for signers with no weight in ep. The
-// byHash entry for the vote's block must already exist (pushVote creates it;
-// applyEpoch only iterates votes that were pushed).
+// byHash entry (and its per-epoch set) is created lazily here, only when a
+// weighted vote is actually credited — a vote with no weight in any epoch it is
+// credited against leaves no byHash entry, so a present entry is never empty.
 func (bv blockVotes) credit(ep *types.Epoch, vote *types.Signed[*types.LaneVote]) bool {
 	c := ep.Committee()
 	w := c.Weight(vote.Key())
 	if w == 0 {
 		return false
 	}
-	byEpoch := bv.byHash[vote.Msg().Header().Hash()]
+	h := vote.Msg().Header().Hash()
+	byEpoch, ok := bv.byHash[h]
+	if !ok {
+		byEpoch = map[types.EpochIndex]*laneVoteSet{}
+		bv.byHash[h] = byEpoch
+	}
 	set := byEpoch[ep.EpochIndex()]
 	if set == nil {
 		set = &laneVoteSet{}

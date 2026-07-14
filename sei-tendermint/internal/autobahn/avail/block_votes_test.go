@@ -16,6 +16,59 @@ func makeVoteEpoch(idx types.EpochIndex, weights map[types.PublicKey]uint64) *ty
 	return types.NewEpoch(idx, rr, time.Time{}, c, 0)
 }
 
+// TestLaneVoteSet_Add exercises the weight accumulation and quorum edge of the
+// laneVoteSet primitive in isolation: it accumulates until quorum, reports the
+// crossing exactly once, and is a no-op afterwards.
+func TestLaneVoteSet_Add(t *testing.T) {
+	rng := utils.TestRng()
+	lane := types.GenSecretKey(rng).Public()
+	header := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng)).Header()
+	mkVote := func() *types.Signed[*types.LaneVote] {
+		return types.Sign(types.GenSecretKey(rng), types.NewLaneVote(header))
+	}
+
+	set := &laneVoteSet{}
+	// Below quorum (2): accumulates, returns false.
+	require.False(t, set.add(1, 2, mkVote()))
+	require.Equal(t, uint64(1), set.weight)
+	require.Len(t, set.votes, 1)
+	// Crosses quorum: returns true exactly on the crossing.
+	require.True(t, set.add(1, 2, mkVote()))
+	require.Equal(t, uint64(2), set.weight)
+	require.Len(t, set.votes, 2)
+	// Already at quorum: no-op, returns false, does not append.
+	require.False(t, set.add(1, 2, mkVote()))
+	require.Equal(t, uint64(2), set.weight)
+	require.Len(t, set.votes, 2)
+
+	// A single heavy vote can cross quorum from empty in one step.
+	heavy := &laneVoteSet{}
+	require.True(t, heavy.add(3, 2, mkVote()))
+	require.Equal(t, uint64(3), heavy.weight)
+	require.Len(t, heavy.votes, 1)
+}
+
+// TestPushVote_ZeroWeightLeavesNoByHashEntry verifies the lazy-creation
+// invariant: a vote whose signer has no weight in any credited epoch is kept in
+// byKey (for later back-fill) but creates no byHash entry, so headers() never
+// observes an empty per-epoch map.
+func TestPushVote_ZeroWeightLeavesNoByHashEntry(t *testing.T) {
+	rng := utils.TestRng()
+	keyA := types.GenSecretKey(rng)
+	keyZ := types.GenSecretKey(rng) // in neither epoch
+
+	ep0 := makeVoteEpoch(0, map[types.PublicKey]uint64{keyA.Public(): 1})
+	ep1 := makeVoteEpoch(1, map[types.PublicKey]uint64{keyA.Public(): 1})
+
+	lane := keyA.Public()
+	header := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng)).Header()
+
+	bv := newBlockVotes()
+	require.False(t, bv.pushVote([]*types.Epoch{ep0, ep1}, types.Sign(keyZ, types.NewLaneVote(header))))
+	require.Contains(t, bv.byKey, keyZ.Public(), "vote retained in byKey for later back-fill")
+	require.NotContains(t, bv.byHash, header.Hash(), "zero-weight vote must not create a byHash entry")
+}
+
 // TestPushVote_AccumulatesPerEpoch verifies that a vote is credited only to the
 // epochs under which its signer has weight, each tracked in its own laneVoteSet.
 // A next-epoch-only signer contributes to the next epoch's set but leaves the
