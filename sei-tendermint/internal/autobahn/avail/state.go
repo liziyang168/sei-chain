@@ -906,6 +906,12 @@ func (s *State) advancePersistedBlockStart(commitQC *types.CommitQC) {
 // callers (acquires s.inner lock internally).
 func (s *State) markBlockPersisted(lane types.LaneID, next types.BlockNumber) {
 	for inner, ctrl := range s.inner.Lock() {
+		// Skip if the lane was decommissioned by an epoch advance between the
+		// persist batch snapshot and this async callback: writing would recreate
+		// a bare, orphaned map entry the cleanup loop never reclaims.
+		if _, ok := inner.nextBlockToPersist[lane]; !ok {
+			return
+		}
 		inner.nextBlockToPersist[lane] = next
 		ctrl.Updated()
 	}
