@@ -580,6 +580,16 @@ func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote
 		// in the window under which its signer has weight. Passing Current and
 		// Next means a next-epoch validator's vote is counted for the next epoch
 		// immediately, so no reweight is needed when the epoch advances.
+		//
+		// This trio load is separate from the one VerifyInWindow used above
+		// (off-lock), so a concurrent boundary advance could credit against a
+		// different trio than the one that verified. That is safe by construction
+		// and must stay so: credit re-derives weight per epoch via
+		// Committee.Weight(key), so a vote only ever counts toward an epoch it is
+		// genuinely a member of; the signature was already checked committee-
+		// independently; and epochTrio only moves forward, so a future-only signer
+		// was already rejected by VerifyInWindow. Do NOT change credit to trust
+		// the verify-time trio instead of re-deriving per-epoch weight.
 		trio := s.epochTrio.Load()
 		if q.q[h.BlockNumber()].pushVote([]*types.Epoch{trio.Current, trio.Next}, vote) {
 			ctrl.Updated()
