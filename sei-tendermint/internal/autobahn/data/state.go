@@ -451,11 +451,18 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 	// Atomically insert QC and blocks.
 	for inner, ctrl := range s.inner.Lock() {
 		if needQC {
+			// needQC was computed under an earlier lock; re-check whether this
+			// call is actually the one inserting the QC range. A concurrent
+			// caller (multiple peer streams call PushQC) may have already applied
+			// it, in which case the loop below no-ops — and we must NOT store the
+			// trio, or a stale caller could regress epochTrio to an older epoch
+			// after another advanced it. Mirrors avail's commitQCs.next re-check.
+			applied := inner.nextQC == gr.First
 			for inner.nextQC < gr.Next {
 				inner.qcs[inner.nextQC] = qc
 				inner.nextQC += 1
 			}
-			if nextTrio != nil {
+			if applied && nextTrio != nil {
 				s.epochTrio.Store(nextTrio)
 			}
 			ctrl.Updated()
