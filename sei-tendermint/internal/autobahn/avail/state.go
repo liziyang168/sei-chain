@@ -176,6 +176,11 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		return nil, err
 	}
 	if inner.commitQCs.next > startTrio.Current.RoadRange().Last {
+		// Tip has crossed startTrio's Current. TrioAt(next) needs Current+Next for
+		// that tip's epoch — e.g. tip in N+1 requires N+2. data.SetupInitialTrio
+		// may only have seeded around a lagging data tip (through N+1), so seed
+		// around the avail CommitQC tip before looking up the trio.
+		data.Registry().SetupInitialTrio(inner.commitQCs.next)
 		nextTrio, err := data.Registry().TrioAt(inner.commitQCs.next)
 		if err != nil {
 			return nil, fmt.Errorf("TrioAt(%d): %w", inner.commitQCs.next, err)

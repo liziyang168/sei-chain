@@ -855,3 +855,35 @@ func TestPushAppQCPreviousEpoch(t *testing.T) {
 	require.NoError(t, state.PushAppQC(appQC, commitQC),
 		"AppQC from epoch N-1 should be accepted when registry has epoch N-1 registered")
 }
+
+// TestRestartAdvanceAcrossEpochNeedsNPlus2 covers the NewState path where
+// restored CommitQCs have crossed startTrio.Current.Last: TrioAt(tip) needs
+// Current+Next for the tip epoch (N+1 → needs N+2), but SetupInitialTrio(0)
+// only seeded {0,1}. NewState must SetupInitialTrio(tip) before TrioAt.
+func TestRestartAdvanceAcrossEpochNeedsNPlus2(t *testing.T) {
+	rng := utils.TestRng()
+	registry, _, _ := epoch.GenRegistry(rng, 3)
+	// GenRegistry/NewRegistry → SetupInitialTrio(0) → epochs {0,1} only.
+	startTrio, err := registry.TrioAt(0)
+	require.NoError(t, err)
+	tip := startTrio.Current.RoadRange().Last + 1 // first road of epoch 1
+	require.Equal(t, types.RoadIndex(epoch.EpochLength), tip)
+
+	_, err = registry.TrioAt(tip)
+	require.Error(t, err, "TrioAt(epoch-1 tip) must fail without epoch 2")
+
+	// Same seeding NewState does before TrioAt(commitQCs.next).
+	registry.SetupInitialTrio(tip)
+	nextTrio, err := registry.TrioAt(tip)
+	require.NoError(t, err)
+	require.Equal(t, types.EpochIndex(1), nextTrio.Current.EpochIndex())
+	require.Equal(t, types.EpochIndex(2), nextTrio.Next.EpochIndex())
+
+	inner, err := newInner(startTrio, utils.None[*loadedAvailState]())
+	require.NoError(t, err)
+	inner.advanceEpochLanes(nextTrio)
+	inner.epochTrio.Store(nextTrio)
+	got := inner.epochTrio.Load()
+	require.Equal(t, types.EpochIndex(1), got.Current.EpochIndex())
+	require.Equal(t, types.EpochIndex(2), got.Next.EpochIndex())
+}
