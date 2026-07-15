@@ -30,6 +30,20 @@ func (w EpochTrio) EpochForRoad(roadIdx RoadIndex) (*Epoch, error) {
 	return nil, fmt.Errorf("road %d not in window %v", roadIdx, w)
 }
 
+// EpochForCommitRoad resolves the epoch for CommitQC ingest.
+func (w EpochTrio) EpochForCommitRoad(roadIdx RoadIndex) (*Epoch, error) {
+	if w.Current.RoadRange().Has(roadIdx) {
+		return w.Current, nil
+	}
+	if w.Next.RoadRange().Has(roadIdx) {
+		return w.Next, nil
+	}
+	if roadIdx > w.Next.RoadRange().Last {
+		panic(fmt.Sprintf("CommitQC road %d above Next %v: impossible after waitForCommitQC in-order tip", roadIdx, w))
+	}
+	return nil, fmt.Errorf("CommitQC road %d before Current in %v", roadIdx, w)
+}
+
 func (w EpochTrio) CurrentAndNextLanes() map[LaneID]struct{} {
 	lanes := make(map[LaneID]struct{})
 	for _, ep := range [2]*Epoch{w.Current, w.Next} {

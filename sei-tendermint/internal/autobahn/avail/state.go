@@ -271,12 +271,10 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return err
 		}
 	}
-	// Verify against the trio window (may lag one epoch at a boundary).
-	// Out-of-window ⇒ already committed / below tip ⇒ drop.
 	trio := s.epochTrio.Load()
-	ep, err := trio.EpochForRoad(idx)
+	ep, err := trio.EpochForCommitRoad(idx)
 	if err != nil {
-		logger.Info("dropping stale CommitQC: road outside epoch window",
+		logger.Info("dropping stale CommitQC: road before Current",
 			slog.Uint64("road", uint64(idx)), "err", err)
 		return nil
 	}

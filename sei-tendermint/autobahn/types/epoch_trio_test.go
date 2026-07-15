@@ -70,6 +70,48 @@ func TestEpochForRoad_OutsideWindowReturnsError(t *testing.T) {
 	}
 }
 
+func TestEpochForCommitRoad_CurrentAndNext(t *testing.T) {
+	prev, current, next, _ := makeThreeEpochs(t)
+	w := types.EpochTrio{Prev: utils.Some(prev), Current: current, Next: next}
+
+	ep, err := w.EpochForCommitRoad(150)
+	if err != nil {
+		t.Fatalf("Current: %v", err)
+	}
+	if ep.EpochIndex() != current.EpochIndex() {
+		t.Fatalf("got epoch %d, want current", ep.EpochIndex())
+	}
+	ep, err = w.EpochForCommitRoad(250)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if ep.EpochIndex() != next.EpochIndex() {
+		t.Fatalf("got epoch %d, want next", ep.EpochIndex())
+	}
+}
+
+func TestEpochForCommitRoad_BeforeCurrentReturnsError(t *testing.T) {
+	prev, current, next, _ := makeThreeEpochs(t)
+	w := types.EpochTrio{Prev: utils.Some(prev), Current: current, Next: next}
+	if _, err := w.EpochForCommitRoad(50); err == nil {
+		t.Fatal("Prev road expected error (stale drop), got nil")
+	}
+	if _, err := w.EpochForCommitRoad(0); err == nil {
+		t.Fatal("road before Prev expected error, got nil")
+	}
+}
+
+func TestEpochForCommitRoad_AboveNextPanics(t *testing.T) {
+	_, current, next, _ := makeThreeEpochs(t)
+	w := types.EpochTrio{Current: current, Next: next}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for road above Next")
+		}
+	}()
+	_, _ = w.EpochForCommitRoad(999)
+}
+
 func TestEpochForRoad_OpenRangePrevDoesNotMaskCurrent(t *testing.T) {
 	// Regression: genesis epoch used to have OpenRoadRange (Last=MaxUint64).
 	// EpochForRoad iterated [Prev, Current, Next], so Prev.Has(any) was always
