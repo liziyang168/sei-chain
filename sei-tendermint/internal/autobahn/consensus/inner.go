@@ -162,6 +162,11 @@ func (s *State) pushCommitQC(qc *types.CommitQC) error {
 		if qc.Proposal().Index() < i.View().Index {
 			return nil
 		}
+		// N+1 must already be in the registry: SetupInitialTrio / sequential
+		// AdvanceIfNeeded seed N+1 before N+2, and avail/data only WaitForEpoch
+		// for N+2 at their CommitQC boundary. Missing N+1 here is a hard
+		// invariant break (unlike avail/data lagging exec on N+2), so error
+		// rather than stall the consensus loop.
 		nextEp, err := i.registry.EpochAt(qc.Proposal().Index() + 1)
 		if err != nil {
 			logger.Error("next epoch not in registry at CommitQC boundary",

@@ -778,10 +778,17 @@ func (s *State) Run(ctx context.Context) error {
 				var blocks []*types.Block
 				for inner := range s.inner.Lock() {
 					for lane := range c.Lanes().All() {
+						// Lane may have been decommissioned if advanceEpochLanes
+						// raced after fullCommitQC resolved ep off-lock (latent
+						// until real committee rotation deletes lanes).
+						q, ok := inner.blocks[lane]
+						if !ok {
+							continue
+						}
 						lr := qc.QC().LaneRange(lane)
 						for n := lr.First(); n < lr.Next(); n++ {
 							// We are not expected to have all the blocks locally - only the available ones.
-							if b, ok := inner.blocks[lr.Lane()].q[n]; ok {
+							if b, ok := q.q[n]; ok {
 								// We don't need to check the blocks against the headers,
 								// as bad blocks will be filtered out by PushQC anyway.
 								blocks = append(blocks, b.Msg().Block())
