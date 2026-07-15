@@ -21,7 +21,7 @@ type registryState struct {
 // All layers (consensus, data, avail) read from it.
 type Registry struct {
 	state utils.RWMutex[*registryState]
-	// highestEpoch is a monotonic high-water mark for WaitForEpoch.
+	// highestEpoch is a monotonic high-water mark for WaitForTrio.
 	// Kept off registryState so EpochAt can stay on the RLock fast path.
 	highestEpoch utils.AtomicSend[types.EpochIndex]
 }
@@ -46,19 +46,6 @@ func NewRegistry(
 	// (snapshots / state sync); until then seed a genesis placeholder trio.
 	r.SetupInitialTrio(0)
 	return r, nil
-}
-
-// WaitForEpoch blocks until epochIdx is registered, or ctx is done.
-//
-// Contract: live waiters only target tip+2 (AdvanceIfNeeded seeds contiguously
-// ahead of execution). SetupInitialTrio may leave gaps below the restart tip;
-// those are not WaitForEpoch targets. Callers must not hold the avail/data
-// inner lock (execution advances highestEpoch under that path).
-func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) error {
-	_, err := r.highestEpoch.Subscribe().Wait(ctx, func(highest types.EpochIndex) bool {
-		return highest >= epochIdx
-	})
-	return err
 }
 
 // SetupInitialTrio registers placeholder epochs {N-2..N+1} around roadIndex
@@ -117,7 +104,7 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 	lastRoad := firstRoad + EpochLength - 1
 	epoch := types.NewEpoch(epochIdx, types.RoadRange{First: firstRoad, Last: lastRoad}, genesis.FirstTimestamp(), genesis.Committee(), genesis.FirstBlock())
 	s.m[epochIdx] = epoch
-	// Wake WaitForEpoch waiters. makeEpoch runs under the write lock, so this
+	// Wake WaitForTrio waiters. makeEpoch runs under the write lock, so this
 	// Load/Store is serialized; highestEpoch only advances.
 	if epochIdx > r.highestEpoch.Load() {
 		r.highestEpoch.Store(epochIdx)
@@ -127,7 +114,7 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 
 // AdvanceIfNeeded seeds epoch N+2 when any road in epoch N is executed.
 // Invariant: by the time Tipcut needs TrioAt(N.Last+1), N+2 is either already
-// registered or waiters use WaitForEpoch(N+2) until this runs.
+// registered or waiters use WaitForTrio until this runs.
 // TODO: pass the real N+2 committee once execution derives it.
 func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
 	nextNextIdx := types.EpochIndex(roadIndex/EpochLength) + 2
@@ -147,6 +134,10 @@ func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
 // TrioAt returns the EpochTrio centered on the epoch containing roadIndex.
 // Current and Next must already be present in the registry (callers seed them);
 // returns an error if either is missing. Prev is absent only when Current is epoch 0.
+//
+// The registry retains epochs indefinitely (no pruning). If pruning is added,
+// a missing epoch below the retain window should surface as ErrPruned so
+// callers can silently drop rather than Wait forever.
 func (r *Registry) TrioAt(roadIndex types.RoadIndex) (types.EpochTrio, error) {
 	centerIdx := types.EpochIndex(roadIndex / EpochLength)
 	current, err := r.EpochAt(types.RoadIndex(centerIdx) * EpochLength)
@@ -164,4 +155,20 @@ func (r *Registry) TrioAt(roadIndex types.RoadIndex) (types.EpochTrio, error) {
 		}
 	}
 	return trio, nil
+}
+
+// WaitForTrio blocks until TrioAt(roadIndex) can succeed (Next registered),
+// then returns that trio. Same retention note as TrioAt.
+// Must not hold the avail/data inner lock (execution seeds via AdvanceIfNeeded).
+func (r *Registry) WaitForTrio(ctx context.Context, roadIndex types.RoadIndex) (types.EpochTrio, error) {
+	if trio, err := r.TrioAt(roadIndex); err == nil {
+		return trio, nil
+	}
+	centerIdx := types.EpochIndex(roadIndex / EpochLength)
+	if _, err := r.highestEpoch.Subscribe().Wait(ctx, func(highest types.EpochIndex) bool {
+		return highest >= centerIdx+1
+	}); err != nil {
+		return types.EpochTrio{}, err
+	}
+	return r.TrioAt(roadIndex)
 }

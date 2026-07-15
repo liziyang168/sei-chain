@@ -282,20 +282,12 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		return fmt.Errorf("qc.Verify(): %w", err)
 	}
 
-	// Boundary: resolve next trio off-lock (TrioAt, else WaitForEpoch(N+2)).
-	// Must not hold inner while waiting — execution seeds N+2 under that path.
+	// Boundary: resolve next trio off-lock (WaitForTrio).
 	var nextTrio *types.EpochTrio
 	if idx == trio.Current.RoadRange().Last {
-		reg := s.data.Registry()
-		nt, err := reg.TrioAt(idx + 1)
+		nt, err := s.data.Registry().WaitForTrio(ctx, idx+1)
 		if err != nil {
-			if err := reg.WaitForEpoch(ctx, trio.Current.EpochIndex()+2); err != nil {
-				return err
-			}
-			nt, err = reg.TrioAt(idx + 1)
-			if err != nil {
-				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
-			}
+			return err
 		}
 		nextTrio = &nt
 	}

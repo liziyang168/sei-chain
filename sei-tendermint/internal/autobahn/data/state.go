@@ -422,20 +422,14 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 		}
 	}
 	// Boundary: resolve next trio off-lock before mutating nextQC
-	// (TrioAt, else WaitForEpoch(N+2)), so a failed wait cannot strand the tip.
+	// (WaitForTrio), so a failed wait cannot strand the tip.
 	idx := qc.QC().Proposal().Index()
 	var nextTrio *types.EpochTrio
 	trio := s.epochTrio.Load()
 	if needQC && idx == trio.Current.RoadRange().Last {
-		nt, err := s.cfg.Registry.TrioAt(idx + 1)
+		nt, err := s.cfg.Registry.WaitForTrio(ctx, idx+1)
 		if err != nil {
-			if err := s.cfg.Registry.WaitForEpoch(ctx, trio.Current.EpochIndex()+2); err != nil {
-				return err
-			}
-			nt, err = s.cfg.Registry.TrioAt(idx + 1)
-			if err != nil {
-				return fmt.Errorf("TrioAt(%d): %w", idx+1, err)
-			}
+			return err
 		}
 		nextTrio = &nt
 	}

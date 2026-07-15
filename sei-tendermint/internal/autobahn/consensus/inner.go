@@ -156,7 +156,7 @@ func (s *State) pushCommitQC(qc *types.CommitQC) error {
 			return nil
 		}
 		// Invariant: N+1 is registered before this CommitQC (setup / AdvanceIfNeeded).
-		// Hard-error if missing — do not WaitForEpoch like avail/data do for N+2.
+		// Hard-error if missing — do not WaitForTrio like avail/data do for N+2.
 		nextEp, err := i.registry.EpochAt(qc.Proposal().Index() + 1)
 		if err != nil {
 			logger.Error("next epoch not in registry at CommitQC boundary",

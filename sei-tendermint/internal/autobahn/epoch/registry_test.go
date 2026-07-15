@@ -6,6 +6,7 @@ import (
 
 	"github.com/sei-protocol/sei-chain/sei-tendermint/autobahn/types"
 	"github.com/sei-protocol/sei-chain/sei-tendermint/libs/utils"
+	"github.com/stretchr/testify/require"
 )
 
 func makeRegistry(t *testing.T) (*Registry, *types.Committee) {
@@ -152,4 +153,32 @@ func TestTrioAt_ErrorWhenNextMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("TrioAt(0) expected error when Next epoch not registered, got nil")
 	}
+}
+
+func TestWaitForTrio_FastPathAndWait(t *testing.T) {
+	r, _ := makeRegistry(t)
+	// NewRegistry SetupInitialTrio(0) → {0,1}; TrioAt(0) is immediate.
+	trio, err := r.WaitForTrio(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, types.EpochIndex(0), trio.Current.EpochIndex())
+
+	// Tipcut into epoch 1 needs epoch 2. Seed after WaitForTrio is blocked.
+	tip := EpochLength
+	_, err = r.TrioAt(tip)
+	require.Error(t, err)
+
+	type result struct {
+		trio types.EpochTrio
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		trio, err := r.WaitForTrio(t.Context(), tip)
+		done <- result{trio, err}
+	}()
+	r.AdvanceIfNeeded(0) // seeds epoch 2
+	got := <-done
+	require.NoError(t, got.err)
+	require.Equal(t, types.EpochIndex(1), got.trio.Current.EpochIndex())
+	require.Equal(t, types.EpochIndex(2), got.trio.Next.EpochIndex())
 }
