@@ -856,34 +856,75 @@ func TestPushAppQCPreviousEpoch(t *testing.T) {
 		"AppQC from epoch N-1 should be accepted when registry has epoch N-1 registered")
 }
 
-// TestRestartAdvanceAcrossEpochNeedsNPlus2 covers the NewState path where
-// restored CommitQCs have crossed startTrio.Current.Last: TrioAt(tip) needs
-// Current+Next for the tip epoch (N+1 → needs N+2), but SetupInitialTrio(0)
-// only seeded {0,1}. NewState must SetupInitialTrio(tip) before TrioAt.
-func TestRestartAdvanceAcrossEpochNeedsNPlus2(t *testing.T) {
+// TestRestartTrioFromCommitTipNeedsNPlus2 covers NewState seeding: TrioAt(tip)
+// for tip in epoch N+1 needs N+2, but SetupInitialTrio(0) only seeded {0,1}.
+func TestRestartTrioFromCommitTipNeedsNPlus2(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 3)
 	// GenRegistry/NewRegistry → SetupInitialTrio(0) → epochs {0,1} only.
-	startTrio, err := registry.TrioAt(0)
+	ep0, err := registry.TrioAt(0)
 	require.NoError(t, err)
-	tip := startTrio.Current.RoadRange().Last + 1 // first road of epoch 1
+	tip := ep0.Current.RoadRange().Last + 1 // first road of epoch 1
 	require.Equal(t, types.RoadIndex(epoch.EpochLength), tip)
 
 	_, err = registry.TrioAt(tip)
 	require.Error(t, err, "TrioAt(epoch-1 tip) must fail without epoch 2")
 
-	// Same seeding NewState does before TrioAt(commitQCs.next).
+	// Same seeding NewState does before TrioAt(commit tip).
 	registry.SetupInitialTrio(tip)
-	nextTrio, err := registry.TrioAt(tip)
+	tipTrio, err := registry.TrioAt(tip)
 	require.NoError(t, err)
-	require.Equal(t, types.EpochIndex(1), nextTrio.Current.EpochIndex())
-	require.Equal(t, types.EpochIndex(2), nextTrio.Next.EpochIndex())
+	require.Equal(t, types.EpochIndex(1), tipTrio.Current.EpochIndex())
+	require.Equal(t, types.EpochIndex(2), tipTrio.Next.EpochIndex())
 
-	inner, err := newInner(startTrio, utils.None[*loadedAvailState]())
+	inner, err := newInner(tipTrio, utils.None[*loadedAvailState]())
 	require.NoError(t, err)
-	inner.advanceEpochLanes(nextTrio)
-	inner.epochTrio.Store(nextTrio)
 	got := inner.epochTrio.Load()
 	require.Equal(t, types.EpochIndex(1), got.Current.EpochIndex())
 	require.Equal(t, types.EpochIndex(2), got.Next.EpochIndex())
+}
+
+func TestCommitTipRoad(t *testing.T) {
+	rng := utils.TestRng()
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
+	require.Equal(t, types.RoadIndex(0), commitTipRoad(utils.None[*loadedAvailState]()))
+
+	qcs := make([]*types.CommitQC, 10)
+	prev := utils.None[*types.CommitQC]()
+	for i := range qcs {
+		qcs[i] = makeCommitQC(registry.LatestEpoch(), keys, prev, nil, utils.None[*types.AppQC]())
+		prev = utils.Some(qcs[i])
+	}
+	require.Equal(t, types.RoadIndex(3), commitTipRoad(utils.Some(&loadedAvailState{
+		commitQCs: []persist.LoadedCommitQC{
+			{Index: 0, QC: qcs[0]},
+			{Index: 1, QC: qcs[1]},
+			{Index: 2, QC: qcs[2]},
+		},
+	})))
+
+	// Loaded tip ahead of prune anchor → tip from last QC.
+	gr1 := qcs[1].GlobalRange()
+	appQC1 := types.NewAppQC(makeAppVotes(keys, types.NewAppProposal(gr1.First, qcs[1].Index(), types.GenAppHash(rng), 0)))
+	require.Equal(t, types.RoadIndex(3), commitTipRoad(utils.Some(&loadedAvailState{
+		pruneAnchor: utils.Some(&PruneAnchor{AppQC: appQC1, CommitQC: qcs[1]}),
+		commitQCs: []persist.LoadedCommitQC{
+			{Index: 1, QC: qcs[1]},
+			{Index: 2, QC: qcs[2]},
+		},
+	})))
+
+	// WAL empty / lagging behind prune anchor → tip from max(., anchor+1).
+	gr9 := qcs[9].GlobalRange()
+	appQC9 := types.NewAppQC(makeAppVotes(keys, types.NewAppProposal(gr9.First, qcs[9].Index(), types.GenAppHash(rng), 0)))
+	require.Equal(t, types.RoadIndex(10), commitTipRoad(utils.Some(&loadedAvailState{
+		pruneAnchor: utils.Some(&PruneAnchor{AppQC: appQC9, CommitQC: qcs[9]}),
+	})))
+	require.Equal(t, types.RoadIndex(10), commitTipRoad(utils.Some(&loadedAvailState{
+		pruneAnchor: utils.Some(&PruneAnchor{AppQC: appQC9, CommitQC: qcs[9]}),
+		commitQCs: []persist.LoadedCommitQC{
+			{Index: 0, QC: qcs[0]},
+			{Index: 1, QC: qcs[1]},
+		},
+	})), "stale WAL below anchor must not win over anchor tipcut")
 }

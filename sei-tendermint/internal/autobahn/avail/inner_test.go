@@ -840,6 +840,48 @@ func TestNewInnerPruneAnchorCommitQCUsedForPrune(t *testing.T) {
 	require.Equal(t, types.RoadIndex(3), i.commitQCs.next)
 }
 
+// TestNewInnerAppVotesFloorFromAnchorNotTipFirstBlock covers tip-based restart:
+// appVotes must be floored by the prune-anchor CommitQC, not tip Current.FirstBlock
+// (queue.prune only advances; a too-high bootstrap would stick).
+func TestNewInnerAppVotesFloorFromAnchorNotTipFirstBlock(t *testing.T) {
+	rng := utils.TestRng()
+	registry, keys, _ := epoch.GenRegistry(rng, 4)
+	ep0 := utils.OrPanic1(registry.EpochAt(0))
+
+	qcs := make([]*types.CommitQC, 3)
+	prev := utils.None[*types.CommitQC]()
+	for i := range qcs {
+		qcs[i] = makeCommitQC(ep0, keys, prev, nil, utils.None[*types.AppQC]())
+		prev = utils.Some(qcs[i])
+	}
+	wantAppFirst := qcs[1].GlobalRange().First
+	// Synthetic tip trio with FirstBlock above the prune floor (placeholder
+	// registry epochs share genesis FirstBlock, so inflate for this invariant).
+	tipFirst := wantAppFirst + 1000
+	c := ep0.Committee()
+	tipCurrent := types.NewEpoch(1, types.RoadRange{First: epoch.EpochLength, Last: 2*epoch.EpochLength - 1}, ep0.FirstTimestamp(), c, tipFirst)
+	tipNext := types.NewEpoch(2, types.RoadRange{First: 2 * epoch.EpochLength, Last: 3*epoch.EpochLength - 1}, ep0.FirstTimestamp(), c, tipFirst)
+	tipTrio := types.EpochTrio{Prev: utils.Some(ep0), Current: tipCurrent, Next: tipNext}
+
+	ap := types.NewAppProposal(wantAppFirst, qcs[1].Index(), types.GenAppHash(rng), 0)
+	loaded := &loadedAvailState{
+		pruneAnchor: utils.Some(&PruneAnchor{
+			AppQC:    types.NewAppQC(makeAppVotes(keys, ap)),
+			CommitQC: qcs[1],
+		}),
+		commitQCs: []persist.LoadedCommitQC{
+			{Index: 1, QC: qcs[1]},
+			{Index: 2, QC: qcs[2]},
+		},
+	}
+
+	inner, err := newInner(tipTrio, utils.Some(loaded))
+	require.NoError(t, err)
+	require.Equal(t, wantAppFirst, inner.appVotes.first,
+		"appVotes must follow prune-anchor GlobalRange, not tip Current.FirstBlock")
+	require.NotEqual(t, tipFirst, inner.appVotes.first)
+}
+
 func TestAdvanceEpochLanes_AddsLanesKeepsOld(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)

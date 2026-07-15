@@ -57,6 +57,23 @@ type loadedAvailState struct {
 	blocks      map[types.LaneID][]persist.LoadedBlock
 }
 
+// commitTipRoad is the tipcut road after restore (commitQCs.next): one past the
+// last loaded CommitQC, floored by the prune-anchor tipcut when the WAL lags.
+func commitTipRoad(loaded utils.Option[*loadedAvailState]) types.RoadIndex {
+	tip := types.RoadIndex(0)
+	ls, ok := loaded.Get()
+	if !ok {
+		return tip
+	}
+	if n := len(ls.commitQCs); n > 0 {
+		tip = ls.commitQCs[n-1].Index + 1
+	}
+	if anchor, ok := ls.pruneAnchor.Get(); ok {
+		tip = max(tip, anchor.CommitQC.Proposal().Index()+1)
+	}
+	return tip
+}
+
 func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailState]) (*inner, error) {
 	lanes := startEpochTrio.CurrentAndNextLanes()
 	votes := map[types.LaneID]*queue[types.BlockNumber, blockVotes]{}
@@ -77,16 +94,17 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 		nextBlockToPersist:  make(map[types.LaneID]types.BlockNumber, len(votes)),
 		persistedBlockStart: make(map[types.LaneID]types.BlockNumber, len(votes)),
 	}
-	i.appVotes.prune(startEpochTrio.Current.FirstBlock())
-
 	l, ok := loaded.Get()
 	if !ok {
+		// Fresh node: appVotes start at the operating epoch's first block.
+		i.appVotes.prune(startEpochTrio.Current.FirstBlock())
 		return i, nil
 	}
 
 	// Apply the persisted prune anchor first: prune() positions all queues
 	// (commitQCs, blocks, votes) so that subsequent pushBack calls insert
 	// at the correct indices without needing reset().
+	// prune also sets appVotes.first from the anchor CommitQC.
 	if anchor, ok := l.pruneAnchor.Get(); ok {
 		logger.Info("loaded persisted prune anchor",
 			slog.Uint64("roadIndex", uint64(anchor.AppQC.Proposal().RoadIndex())),
@@ -98,6 +116,10 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 		for lane := range i.blocks {
 			i.persistedBlockStart[lane] = anchor.CommitQC.LaneRange(lane).First()
 		}
+	} else if startEpochTrio.Current.EpochIndex() == 0 {
+		// No anchor: don't raise appVotes to a tip epoch's FirstBlock — live
+		// advanceEpochLanes also leaves appVotes at the genesis floor.
+		i.appVotes.prune(startEpochTrio.Current.FirstBlock())
 	}
 
 	// Restore persisted CommitQCs. prune() may have already pushed the

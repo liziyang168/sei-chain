@@ -157,45 +157,24 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		return nil, err
 	}
 
-	// TODO: in production a node should always restart from a snapshot rather than
-	// genesis; starting from road 0 is only correct on the very first boot.
-	startRoadIdx := types.RoadIndex(0)
-	if ls, ok := loaded.Get(); ok {
-		if anchor, ok := ls.pruneAnchor.Get(); ok {
-			startRoadIdx = anchor.CommitQC.Proposal().Index()
-		}
-	}
-	// Epochs for this road must already be present: data.NewState peeks its
-	// CommitQC WAL and calls SetupInitialTrio before avail is constructed.
-	startTrio, err := data.Registry().TrioAt(startRoadIdx)
+	// Operating trio is the CommitQC tipcut (not the prune-anchor road).
+	// Tip may lead data.SetupInitialTrio; seed around it before TrioAt.
+	commitTip := commitTipRoad(loaded)
+	data.Registry().SetupInitialTrio(commitTip)
+	startTrio, err := data.Registry().TrioAt(commitTip)
 	if err != nil {
-		return nil, fmt.Errorf("TrioAt(%d): %w", startRoadIdx, err)
+		return nil, fmt.Errorf("TrioAt(%d): %w", commitTip, err)
 	}
 	inner, err := newInner(startTrio, loaded)
 	if err != nil {
 		return nil, err
 	}
-	if inner.commitQCs.next > startTrio.Current.RoadRange().Last {
-		// Tip past prune trio's Current: seed registry for tip then advance.
-		data.Registry().SetupInitialTrio(inner.commitQCs.next)
-		nextTrio, err := data.Registry().TrioAt(inner.commitQCs.next)
-		if err != nil {
-			return nil, fmt.Errorf("TrioAt(%d): %w", inner.commitQCs.next, err)
-		}
-		inner.advanceEpochLanes(nextTrio)
-		inner.epochTrio.Store(nextTrio)
-	}
 
 	// Truncate WAL entries below the prune anchor that were filtered out by
-	// loadPersistedState.
+	// loadPersistedState. Lanes come from the operating (tip) trio.
 	if ls, ok := loaded.Get(); ok {
 		if anchor, ok := ls.pruneAnchor.Get(); ok {
-			anchorTrio, err := data.Registry().TrioAt(anchor.CommitQC.Proposal().Index())
-			if err != nil {
-				return nil, fmt.Errorf("TrioAt(%d): %w", anchor.CommitQC.Proposal().Index(), err)
-			}
-			lanes := anchorTrio.CurrentAndNextLanes()
-			for lane := range lanes {
+			for lane := range startTrio.CurrentAndNextLanes() {
 				if err := pers.blocks.MaybePruneAndPersistLane(lane, utils.Some(anchor.CommitQC), nil, utils.None[func(*types.Signed[*types.LaneProposal])]()); err != nil {
 					return nil, fmt.Errorf("prune stale block WAL entries: %w", err)
 				}
