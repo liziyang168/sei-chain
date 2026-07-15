@@ -118,7 +118,7 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 		}
 	} else if startEpochTrio.Current.EpochIndex() == 0 {
 		// No anchor: don't raise appVotes to a tip epoch's FirstBlock — live
-		// advanceEpochLanes also leaves appVotes at the genesis floor.
+		// advanceEpoch also leaves appVotes at the genesis floor.
 		i.appVotes.prune(startEpochTrio.Current.FirstBlock())
 	}
 
@@ -139,7 +139,7 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 
 	// Restore persisted blocks. Create queues on demand for any lane present
 	// in the WAL — lanes outside the current epoch will be pruned by
-	// advanceEpochLanes in NewState if a boundary was crossed.
+	// advanceEpoch in NewState if a boundary was crossed.
 	for lane, bs := range l.blocks {
 		if len(bs) == 0 {
 			continue
@@ -180,11 +180,10 @@ func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) 
 	return i.votes[lane].q[n].laneQC(ep)
 }
 
-// advanceEpochLanes ensures Current∪Next lanes exist and backfills Next's
-// vote sets from stored signatures (pushVote only credits Current+Next at push time).
+// advanceEpoch applies nextTrio at an epoch boundary.
 //
 // TODO(lane-expiry): do not delete old lanes here until epoch-scoped lane IDs exist.
-func (i *inner) advanceEpochLanes(nextTrio types.EpochTrio) {
+func (i *inner) advanceEpoch(nextTrio types.EpochTrio) {
 	activeLanes := nextTrio.CurrentAndNextLanes()
 	for lane := range activeLanes {
 		if _, ok := i.blocks[lane]; !ok {
@@ -206,6 +205,7 @@ func (i *inner) advanceEpochLanes(nextTrio types.EpochTrio) {
 			voteQueue.q[n].applyEpoch(nextTrio.Next)
 		}
 	}
+	i.epochTrio.Store(nextTrio)
 }
 
 // prune advances the state to account for a new AppQC/CommitQC pair.

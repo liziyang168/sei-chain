@@ -882,7 +882,7 @@ func TestNewInnerAppVotesFloorFromAnchorNotTipFirstBlock(t *testing.T) {
 	require.NotEqual(t, tipFirst, inner.appVotes.first)
 }
 
-func TestAdvanceEpochLanes_AddsLanesKeepsOld(t *testing.T) {
+func TestAdvanceEpoch_AddsLanesKeepsOld(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 	trio := utils.OrPanic1(registry.TrioAt(0))
@@ -909,12 +909,12 @@ func TestAdvanceEpochLanes_AddsLanesKeepsOld(t *testing.T) {
 	i.nextBlockToPersist[bogusLane] = 0
 	i.persistedBlockStart[bogusLane] = 0
 
-	i.advanceEpochLanes(trio)
+	i.advanceEpoch(trio)
 	require.Contains(t, i.blocks, bogusLane, "old lanes must be retained until lane-expiry")
 	require.Contains(t, i.blocks, realLane, "active lane removed incorrectly")
 }
 
-func TestAdvanceEpochLanes_EmptyQueuesNoop(t *testing.T) {
+func TestAdvanceEpoch_EmptyQueuesNoop(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 	trio := utils.OrPanic1(registry.TrioAt(0))
@@ -924,13 +924,13 @@ func TestAdvanceEpochLanes_EmptyQueuesNoop(t *testing.T) {
 
 	// No votes in any queue; advancing to the same trio is a safe no-op that
 	// keeps the current lane set intact.
-	i.advanceEpochLanes(trio)
+	i.advanceEpoch(trio)
 	for lane := range trio.Current.Committee().Lanes().All() {
 		require.Contains(t, i.blocks, lane)
 	}
 }
 
-func TestAdvanceEpochLanes_RetainsPrevEpochLanes(t *testing.T) {
+func TestAdvanceEpoch_RetainsPrevEpochLanes(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 
@@ -949,7 +949,7 @@ func TestAdvanceEpochLanes_RetainsPrevEpochLanes(t *testing.T) {
 
 	// trio1: Prev=epoch0, Current=epoch1, Next=epoch2
 	trio1 := utils.OrPanic1(registry.TrioAt(epoch.EpochLength))
-	i.advanceEpochLanes(trio1)
+	i.advanceEpoch(trio1)
 
 	// Epoch0 lane is now in Prev — must be retained for boundary QC collection.
 	require.Contains(t, i.blocks, epoch0Lane, "Prev-epoch lane deleted prematurely; fullCommitQC needs it")

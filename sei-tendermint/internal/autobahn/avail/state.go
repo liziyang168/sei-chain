@@ -297,8 +297,7 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return nil
 		}
 		if nextTrio != nil {
-			inner.advanceEpochLanes(*nextTrio)
-			inner.epochTrio.Store(*nextTrio)
+			inner.advanceEpoch(*nextTrio)
 			// Always wake: next-epoch lane quorum may already be silent in pushVote.
 		}
 		inner.commitQCs.pushBack(qc)
