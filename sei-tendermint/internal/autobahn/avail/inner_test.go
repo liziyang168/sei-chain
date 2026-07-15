@@ -840,7 +840,7 @@ func TestNewInnerPruneAnchorCommitQCUsedForPrune(t *testing.T) {
 	require.Equal(t, types.RoadIndex(3), i.commitQCs.next)
 }
 
-func TestAdvanceEpochLanes_AddsAndRemovesLanes(t *testing.T) {
+func TestAdvanceEpochLanes_AddsLanesKeepsOld(t *testing.T) {
 	rng := utils.TestRng()
 	registry, _, _ := epoch.GenRegistry(rng, 4)
 	trio := utils.OrPanic1(registry.TrioAt(0))
@@ -853,7 +853,8 @@ func TestAdvanceEpochLanes_AddsAndRemovesLanes(t *testing.T) {
 		require.Contains(t, i.blocks, lane, "lane %v missing after newInner", lane)
 	}
 
-	// Add a bogus extra lane directly.
+	// Add a lane not in the trio — until lane-expiry lands, advance must not
+	// delete it (ever-growing map).
 	var realLane types.LaneID
 	for l := range trio.Current.Committee().Lanes().All() {
 		realLane = l
@@ -866,9 +867,8 @@ func TestAdvanceEpochLanes_AddsAndRemovesLanes(t *testing.T) {
 	i.nextBlockToPersist[bogusLane] = 0
 	i.persistedBlockStart[bogusLane] = 0
 
-	// advanceEpochLanes removes the bogus lane and keeps the real one.
 	i.advanceEpochLanes(trio)
-	require.NotContains(t, i.blocks, bogusLane, "decommissioned lane still present")
+	require.Contains(t, i.blocks, bogusLane, "old lanes must be retained until lane-expiry")
 	require.Contains(t, i.blocks, realLane, "active lane removed incorrectly")
 }
 

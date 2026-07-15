@@ -21,10 +21,8 @@ type registryState struct {
 // All layers (consensus, data, avail) read from it.
 type Registry struct {
 	state utils.RWMutex[*registryState]
-	// highestEpoch is the highest epoch index registered so far. It only ever
-	// increases (epochs are registered contiguously from the current operating
-	// point), so WaitForEpoch can block until it reaches a target index. Kept
-	// separate from state so the RLock read fast-path on state is preserved.
+	// highestEpoch is a monotonic high-water mark for WaitForEpoch.
+	// Kept off registryState so EpochAt can stay on the RLock fast path.
 	highestEpoch utils.AtomicSend[types.EpochIndex]
 }
 
@@ -50,22 +48,12 @@ func NewRegistry(
 	return r, nil
 }
 
-// WaitForEpoch blocks until epochIdx has been registered, or ctx is done.
+// WaitForEpoch blocks until epochIdx is registered, or ctx is done.
 //
-// Waiting on the single highestEpoch value is sufficient for the live path:
-// AdvanceIfNeeded registers epochs contiguously ahead of execution (N → N+2),
-// and callers only wait for Current.EpochIndex()+2. SetupInitialTrio may also
-// raise highestEpoch while leaving gaps below the restart tip; those gaps are
-// never WaitForEpoch targets (callers do not wait for epochs behind tip).
-//
-// Used at an epoch boundary: a node whose CommitQC stream has outrun its own
-// block execution waits here rather than failing, and unblocks once execution
-// catches up.
-//
-// CALLER CONTRACT: only block execution (AdvanceIfNeeded -> makeEpoch) advances
-// highestEpoch for live waits, so callers MUST NOT hold any lock on that path —
-// notably the avail/data inner lock — or the wake can never fire. WaitForEpoch
-// itself holds no registry lock while blocked (it waits on the highestEpoch channel).
+// Contract: live waiters only target tip+2 (AdvanceIfNeeded seeds contiguously
+// ahead of execution). SetupInitialTrio may leave gaps below the restart tip;
+// those are not WaitForEpoch targets. Callers must not hold the avail/data
+// inner lock (execution advances highestEpoch under that path).
 func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) error {
 	_, err := r.highestEpoch.Subscribe().Wait(ctx, func(highest types.EpochIndex) bool {
 		return highest >= epochIdx
@@ -73,13 +61,9 @@ func (r *Registry) WaitForEpoch(ctx context.Context, epochIdx types.EpochIndex) 
 	return err
 }
 
-// SetupInitialTrio registers placeholder epochs around roadIndex's epoch N:
-// N-2, N-1, N, and N+1 (clamped at 0). That covers TrioAt(roadIndex) (Current+Next)
-// and leaves room for a lagging startTrio (e.g. avail prune anchor) up to two
-// epochs behind the tip. Epochs already present are left unchanged. Placeholders
-// reuse the genesis committee.
-//
-// Called from data.NewState after peeking the CommitQC WAL tip.
+// SetupInitialTrio registers placeholder epochs {N-2..N+1} around roadIndex
+// (clamped at 0) with the genesis committee. Idempotent for existing entries.
+// TODO: replace with verified snapshot / state-sync epoch info.
 func (r *Registry) SetupInitialTrio(roadIndex types.RoadIndex) {
 	n := types.EpochIndex(roadIndex / EpochLength)
 	first := types.EpochIndex(0)
@@ -141,18 +125,10 @@ func (r *Registry) makeEpoch(s *registryState, epochIdx types.EpochIndex) (*type
 	return epoch, nil
 }
 
-// AdvanceIfNeeded seeds epoch N+2 when a block in epoch N is executed.
-// Called by executeBlock (giga_router_common.go) on both validator and full-node paths.
-//
-// Seeding model: execution of any block in epoch N seeds epoch N+2 as a
-// placeholder (genesis committee). Epoch N+1 is seeded by executing epoch N-1
-// blocks (same rule applied one epoch earlier), or by SetupInitialTrio at startup.
-// At the epoch boundary avail.PushCommitQC needs TrioAt(N.Last+1), which requires
-// N+2 as Next; if a node's CommitQC stream has outrun its execution and N+2 is
-// not yet seeded, it blocks on WaitForEpoch until execution seeds it here.
-//
-// TODO: real committee rotation — pass the derived committee for N+2 here once
-// the execution layer computes it from the last block of epoch N.
+// AdvanceIfNeeded seeds epoch N+2 when any road in epoch N is executed.
+// Invariant: by the time Tipcut needs TrioAt(N.Last+1), N+2 is either already
+// registered or waiters use WaitForEpoch(N+2) until this runs.
+// TODO: pass the real N+2 committee once execution derives it.
 func (r *Registry) AdvanceIfNeeded(roadIndex types.RoadIndex) {
 	nextNextIdx := types.EpochIndex(roadIndex/EpochLength) + 2
 	// Fast path: epoch already seeded (common after the first block of the epoch).

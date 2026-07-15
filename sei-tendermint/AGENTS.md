@@ -26,6 +26,7 @@ Within sei-tendermint subdirectory
   Required fields must be nil-checked at the boundary (constructor and proto Decode) and trusted
   everywhere else — do not add defensive nil-checks in internal logic.
 * Avoid removing comments and logs which are not obviously obsolete. Keep the original wording, only fixing mistakes or obsolete parts.
+* Prefer concise comments that state invariants, contracts, and observable behavior (plus brief correctness reasoning when non-obvious). Avoid narrating how the implementation works step-by-step.
 * TestRng instance should be one per test, constructed directly in the test function. In case of nested/table tests, each nested test should create its own instance. 
   Use TestRng.Split() (before spawning) if you need to pass entropy source to a spawned goroutine
   to ensure deterministic entropy across the goroutines.

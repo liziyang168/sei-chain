@@ -118,16 +118,9 @@ func newInner(data utils.Option[*pb.PersistedInner], registry *epoch.Registry) (
 		persisted = *decoded
 	}
 
-	// The runtime epoch is the current view's epoch (NextIndexOpt(CommitQC)):
-	// View() must stamp the next view with the epoch it belongs to. But the
-	// persisted CommitQC must be verified against its own epoch, which differs
-	// from the view epoch when the CommitQC is on the last road of an epoch.
+	// View epoch = tipcut road; CommitQC may still be the prior epoch's last road.
 	nextViewRoad := types.NextIndexOpt(persisted.CommitQC)
-	// data.NewState already SetupInitialTrio's from the data WAL tip. Consensus's
-	// persisted CommitQC can still lead that tip (avail advances before the async
-	// FullCommitQC→data.PushQC path), so seed around the consensus road as well.
-	// TODO: in the future this information will be read from disk and verified
-	// (snapshots / state sync); until then derive it from persisted CommitQC.
+	// Seed around consensus tip (may lead data WAL tip). TODO: verified snapshot.
 	registry.SetupInitialTrio(nextViewRoad)
 	viewEpoch, err := registry.EpochAt(nextViewRoad)
 	if err != nil {
@@ -162,11 +155,8 @@ func (s *State) pushCommitQC(qc *types.CommitQC) error {
 		if qc.Proposal().Index() < i.View().Index {
 			return nil
 		}
-		// N+1 must already be in the registry: SetupInitialTrio / sequential
-		// AdvanceIfNeeded seed N+1 before N+2, and avail/data only WaitForEpoch
-		// for N+2 at their CommitQC boundary. Missing N+1 here is a hard
-		// invariant break (unlike avail/data lagging exec on N+2), so error
-		// rather than stall the consensus loop.
+		// Invariant: N+1 is registered before this CommitQC (setup / AdvanceIfNeeded).
+		// Hard-error if missing — do not WaitForEpoch like avail/data do for N+2.
 		nextEp, err := i.registry.EpochAt(qc.Proposal().Index() + 1)
 		if err != nil {
 			logger.Error("next epoch not in registry at CommitQC boundary",
@@ -199,8 +189,7 @@ func (s *State) pushTimeoutQC(ctx context.Context, qc *types.TimeoutQC) error {
 		if qc.View().Less(i.View()) {
 			return nil
 		}
-		// TimeoutQC advances view number; clear votes and prepareQC (stale view).
-		// Epoch is unchanged: the road index did not advance, so i.epoch carries over.
+		// TimeoutQC advances view number; clear votes and prepareQC. Epoch unchanged.
 		isend.Store(inner{persistedInner: persistedInner{CommitQC: i.CommitQC, TimeoutQC: utils.Some(qc)}, registry: i.registry, epoch: i.epoch})
 	}
 	return nil
@@ -226,11 +215,6 @@ func (s *State) pushProposal(ctx context.Context, proposal *types.FullProposal) 
 		if i.View() != proposal.View() || i.TimeoutVote.IsPresent() || i.PrepareVote.IsPresent() {
 			return nil
 		}
-		// No epoch-seeding gate is needed here: avail.PushCommitQC blocks
-		// (WaitForEpoch) until the next epoch's committee is seeded before it
-		// advances the trio at a boundary, so consensus can vote freely and a node
-		// whose execution lags simply stalls at the boundary rather than racing
-		// ahead of seeding.
 		v := types.Sign(s.cfg.Key, types.NewPrepareVote(proposal.Proposal().Msg()))
 		i.PrepareVote = utils.Some(v)
 		isend.Store(i)

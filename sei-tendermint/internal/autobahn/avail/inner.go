@@ -153,11 +153,7 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 	return i, nil
 }
 
-// laneQC returns a LaneQC for (lane, n) under ep — the committee, quorum, and
-// per-epoch vote set all resolved from ep. Callers pass the epoch the proposal
-// is being built for; using ep (not the cached trio's Current) keeps the lookup
-// consistent with the lanes WaitForLaneQCs iterates, which can differ from
-// Current across an epoch boundary.
+// laneQC returns a LaneQC for (lane, n) under ep's committee and vote set.
 func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) (*types.LaneQC, bool) {
 	c := ep.Committee()
 	quorum := c.LaneQuorum()
@@ -170,14 +166,10 @@ func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) 
 	return nil, false
 }
 
-// advanceEpochLanes rotates the lane set for a crossing into nextTrio: it
-// creates queues for lanes newly introduced by the next epoch, drops lanes no
-// longer in the window, and back-fills the newly-entering Next epoch's vote
-// sets. pushVote credits each vote to the Current and Next epochs only, so when
-// nextTrio.Next first enters the window its sets are empty; applyEpoch seeds
-// them from stored votes so a block that finalizes under it (a lagging lane, or
-// an identical committee) still reaches quorum. The prior Current/Next sets
-// were already filled by pushVote, so they need no adjustment.
+// advanceEpochLanes ensures Current∪Next lanes exist and backfills Next's
+// vote sets from stored signatures (pushVote only credits Current+Next at push time).
+//
+// TODO(lane-expiry): do not delete old lanes here until epoch-scoped lane IDs exist.
 func (i *inner) advanceEpochLanes(nextTrio types.EpochTrio) {
 	activeLanes := nextTrio.CurrentAndNextLanes()
 	for lane := range activeLanes {
@@ -192,19 +184,6 @@ func (i *inner) advanceEpochLanes(nextTrio types.EpochTrio) {
 		}
 		if _, ok := i.persistedBlockStart[lane]; !ok {
 			i.persistedBlockStart[lane] = 0
-		}
-	}
-	// Retain Prev-epoch lanes in the deletion guard: fullCommitQC may still be
-	// collecting headers from the boundary QC that triggered this advance, and
-	// it accesses lane queues by epoch N's committee. Prev lanes are cleaned up
-	// naturally on the next epoch advance when they fall outside AllLanes().
-	retainLanes := nextTrio.AllLanes()
-	for lane := range i.blocks {
-		if _, ok := retainLanes[lane]; !ok {
-			delete(i.blocks, lane)
-			delete(i.votes, lane)
-			delete(i.nextBlockToPersist, lane)
-			delete(i.persistedBlockStart, lane)
 		}
 	}
 	// Seed the newly-entering Next epoch's vote sets from votes already stored.

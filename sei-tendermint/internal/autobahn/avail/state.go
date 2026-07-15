@@ -176,10 +176,7 @@ func NewState(key types.SecretKey, data *data.State, stateDir utils.Option[strin
 		return nil, err
 	}
 	if inner.commitQCs.next > startTrio.Current.RoadRange().Last {
-		// Tip has crossed startTrio's Current. TrioAt(next) needs Current+Next for
-		// that tip's epoch — e.g. tip in N+1 requires N+2. data.SetupInitialTrio
-		// may only have seeded around a lagging data tip (through N+1), so seed
-		// around the avail CommitQC tip before looking up the trio.
+		// Tip past prune trio's Current: seed registry for tip then advance.
 		data.Registry().SetupInitialTrio(inner.commitQCs.next)
 		nextTrio, err := data.Registry().TrioAt(inner.commitQCs.next)
 		if err != nil {
@@ -295,13 +292,8 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 			return err
 		}
 	}
-	// Resolve the epoch that signed this QC. EpochForRoad searches the whole
-	// Prev/Current/Next window because the cached trio can lag by one across a
-	// boundary: a QC for the new epoch may arrive while Current is still the old
-	// one, or land in Prev just after a rotation — both verify correctly here.
-	// A road outside the window can only be below it (in-order processing via
-	// waitForCommitQC bounds how far ahead idx can be), i.e. a QC we already
-	// committed, so it is not needed — skip it like the stale case below.
+	// Verify against the trio window (may lag one epoch at a boundary).
+	// Out-of-window ⇒ already committed / below tip ⇒ drop.
 	trio := s.epochTrio.Load()
 	ep, err := trio.EpochForRoad(idx)
 	if err != nil {
@@ -313,21 +305,8 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		return fmt.Errorf("qc.Verify(): %w", err)
 	}
 
-	// If this QC closes the current epoch, resolve the next trio before taking
-	// the inner lock. Almost always epoch N+2 (the incoming trio's Next) is
-	// already seeded by the time the boundary QC arrives, so the plain TrioAt
-	// fast path succeeds. Only if it hasn't been seeded — a node whose CommitQC
-	// stream has outrun its own block execution (which seeds epochs via
-	// AdvanceIfNeeded) — do we block until execution catches up, then retry.
-	//
-	// While blocked in WaitForEpoch, the ONLY thing paused is CommitQC ingest:
-	// this goroutine (storeCommitQC, or the CommitQC stream reader on a catch-up
-	// node) stops, and the next PushCommitQC queues behind it on waitForCommitQC.
-	// No lock is held, and every other goroutine keeps running — crucially the
-	// avail pusher (fullCommitQC -> data.PushQC), data persistence, and
-	// runExecute. Execution processes the epoch-N roads already below N.Last
-	// (whose CommitQCs were ingested before this one), seeds N+2, and wakes us.
-	// So the wait is bounded by execution, never deadlocked on it.
+	// Boundary: resolve next trio off-lock (TrioAt, else WaitForEpoch(N+2)).
+	// Must not hold inner while waiting — execution seeds N+2 under that path.
 	var nextTrio *types.EpochTrio
 	if idx == trio.Current.RoadRange().Last {
 		reg := s.data.Registry()
@@ -348,23 +327,14 @@ func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 		if idx != inner.commitQCs.next {
 			return nil
 		}
-		// nextTrio is non-nil iff this QC closed the current epoch (the boundary
-		// check above), so this branch runs once per epoch transition.
 		if nextTrio != nil {
 			inner.advanceEpochLanes(*nextTrio)
 			inner.epochTrio.Store(*nextTrio)
-			// The trailing ctrl.Updated() below is the ONLY wake that surfaces
-			// laneQCs already at quorum in the incoming Current (old Next) epoch:
-			// pushVote credited those votes silently (it notifies only for the
-			// then-current epoch), so WaitForLaneQCs must be woken here to re-scan
-			// laneQC under the just-stored trio. Do not make it conditional or the
-			// boundary stalls.
+			// Always wake: next-epoch lane quorum may already be silent in pushVote.
 		}
 		inner.commitQCs.pushBack(qc)
 		metrics.ObserveCommitQC(qc)
-		// The persist goroutine publishes latestCommitQC after writing to disk
-		// (or immediately for no-op persisters), so consensus won't advance
-		// until the CommitQC is durable.
+		// latestCommitQC advances only after durable persist (or no-op persister).
 		ctrl.Updated()
 		return nil
 	}
@@ -376,11 +346,7 @@ func (s *State) PushAppVote(ctx context.Context, v *types.Signed[*types.AppVote]
 	idx := v.Msg().Proposal().RoadIndex()
 	ep, err := s.epochTrio.Load().EpochForRoad(idx)
 	if err != nil {
-		// A needed AppVote is for a road at or below the CommitQC frontier and no
-		// more than one epoch behind it, hence in-window. A miss here means the
-		// road has fallen out of the window — a stale/superseded vote a lagging
-		// peer is still broadcasting. Drop it rather than erroring, which would
-		// tear down the whole peer connection (all streams, not just AppVotes).
+		// Out-of-window ⇒ stale; drop (do not tear down the peer).
 		logger.Info("dropping stale AppVote: road outside epoch window",
 			slog.Uint64("road", uint64(idx)), "err", err)
 		return nil
@@ -580,20 +546,8 @@ func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote
 		for q.next <= h.BlockNumber() {
 			q.pushBack(newBlockVotes())
 		}
-		// pushVote accumulates weight per epoch: a vote counts toward every epoch
-		// in the window under which its signer has weight. Passing Current and
-		// Next means a next-epoch validator's vote is counted for the next epoch
-		// immediately, so no reweight is needed when the epoch advances.
-		//
-		// This trio load is separate from the one VerifyInWindow used above
-		// (off-lock), so a concurrent boundary advance could credit against a
-		// different trio than the one that verified. That is safe by construction
-		// and must stay so: credit re-derives weight per epoch via
-		// Committee.Weight(key), so a vote only ever counts toward an epoch it is
-		// genuinely a member of; the signature was already checked committee-
-		// independently; and epochTrio only moves forward, so a future-only signer
-		// was already rejected by VerifyInWindow. Do NOT change credit to trust
-		// the verify-time trio instead of re-deriving per-epoch weight.
+		// Credit under a fresh trio load. Safe if the window advanced since
+		// VerifyInWindow: weight is re-derived per epoch; trio only moves forward.
 		trio := s.epochTrio.Load()
 		if q.q[h.BlockNumber()].pushVote([]*types.Epoch{trio.Current, trio.Next}, vote) {
 			ctrl.Updated()
@@ -646,9 +600,7 @@ func (s *State) headers(ctx context.Context, lr *types.LaneRange) ([]*types.Bloc
 	return headers, nil
 }
 
-// fullCommitQC returns the FullCommitQC for road n along with the epoch that
-// signed it, so callers can reuse the resolved epoch without a second lookup
-// (which could race the epoch window and fail on the same road).
+// fullCommitQC returns the FullCommitQC for road n and the signing epoch.
 func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.FullCommitQC, *types.Epoch, error) {
 	// Collect the CommitQC.
 	qc, err := s.CommitQC(ctx, n)
@@ -659,9 +611,7 @@ func (s *State) fullCommitQC(ctx context.Context, n types.RoadIndex) (*types.Ful
 	var commitHeaders []*types.BlockHeader
 	ep, err := s.epochTrio.Load().EpochForRoad(qc.Proposal().Index())
 	if err != nil {
-		// The epoch window can advance twice between CommitQC() returning and this
-		// lookup, dropping this QC's road below the window. Its blocks are then
-		// below the prune cursor, so treat it as pruned (the caller skips pruned QCs).
+		// Window raced past this road ⇒ treat as pruned for the PushQC loop.
 		return nil, nil, fmt.Errorf("epoch window advanced past road %d: %w", qc.Proposal().Index(), data.ErrPruned)
 	}
 	for lane := range ep.Committee().Lanes().All() {
@@ -778,9 +728,7 @@ func (s *State) Run(ctx context.Context) error {
 				var blocks []*types.Block
 				for inner := range s.inner.Lock() {
 					for lane := range c.Lanes().All() {
-						// Lane may have been decommissioned if advanceEpochLanes
-						// raced after fullCommitQC resolved ep off-lock (latent
-						// until real committee rotation deletes lanes).
+						// Missing lane queue ⇒ skip (not yet created / future expiry).
 						q, ok := inner.blocks[lane]
 						if !ok {
 							continue
@@ -917,12 +865,7 @@ func (s *State) advancePersistedBlockStart(commitQC *types.CommitQC) {
 // callers (acquires s.inner lock internally).
 func (s *State) markBlockPersisted(lane types.LaneID, next types.BlockNumber) {
 	for inner, ctrl := range s.inner.Lock() {
-		// Skip if the lane was decommissioned by an epoch advance between the
-		// persist batch snapshot and this async callback: writing would recreate
-		// a bare, orphaned map entry the cleanup loop never reclaims. Gate on
-		// blocks[lane] (created per-lane in newInner, deleted only by
-		// advanceEpochLanes) — not nextBlockToPersist, which is populated lazily
-		// by this very function, so a missing entry there is normal first-write.
+		// Skip if blocks[lane] is gone; nextBlockToPersist may be lazily empty.
 		if _, ok := inner.blocks[lane]; !ok {
 			return
 		}

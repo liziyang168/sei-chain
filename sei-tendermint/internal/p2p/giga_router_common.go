@@ -288,11 +288,8 @@ func (r *gigaRouterCommon) executeBlock(ctx context.Context, b *atypes.GlobalBlo
 	if err := r.data.PushAppHash(ctx, b.GlobalNumber, resp.AppHash); err != nil {
 		return nil, fmt.Errorf("r.data.PushAppHash(%v): %w", b.GlobalNumber, err)
 	}
-	// Seed epoch N+2 from the executed tipcut road (not FinalAppState: that is a
-	// lagging AppQC stamp and can stick under carry-forward). Both validators and
-	// full nodes execute blocks, so this is the single path that advances epoch
-	// seeding. When real committee rotation is implemented, execution of epoch N
-	// will pass the derived committee for N+2 here instead of a placeholder.
+	// Seed N+2 from the executed CommitQC tipcut (not lagging FinalAppState).
+	// TODO: real N+2 committee once execution derives it.
 	qc, err := r.data.QC(ctx, b.GlobalNumber)
 	if err != nil {
 		return nil, fmt.Errorf("r.data.QC(%v): %w", b.GlobalNumber, err)

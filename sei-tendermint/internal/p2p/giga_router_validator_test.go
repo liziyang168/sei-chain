@@ -188,9 +188,7 @@ func TestGigaRouter_FinalizeBlocks(t *testing.T) {
 			}
 			require.Equal(t, gb.Payload.Txs(), rbBytes, "router[0].BlockByNumber(%v).Block.Data.Txs ≠ data.GlobalBlock(%v).Payload.Txs", h, h)
 		}
-		// executeBlock seeds epoch N+2 from the executed CommitQC road (AdvanceIfNeeded).
-		// Registry starts with only {0,1} from SetupInitialTrio(0); after any epoch-0
-		// execution, epoch 2 must be present.
+		// executeBlock → AdvanceIfNeeded must seed epoch 2 after epoch-0 execution.
 		_, err := giga0.data.Registry().EpochAt(2 * epoch.EpochLength)
 		require.NoError(t, err, "executeBlock should AdvanceIfNeeded so epoch 2 is registered")
 		return nil

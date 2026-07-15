@@ -160,8 +160,7 @@ type inner struct {
 	// RetainHeight pruning, making this in-memory index obsolete.
 	blockHashes map[types.BlockHeaderHash]types.GlobalBlockNumber
 
-	// epochTrio is this layer's Prev/Current/Next window. Store only under
-	// Watch.Lock; readers use State.epochTrio (AtomicRecv).
+	// Store under Watch.Lock; readers use State.epochTrio.
 	epochTrio utils.AtomicSend[types.EpochTrio]
 
 	// first <= nextAppProposal <= nextBlockToPersist <= nextBlock <= nextQC
@@ -302,21 +301,15 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	if dataFirst > cfg.Registry.FirstBlock() {
 		inner.skipTo(dataFirst)
 	}
-	// Seed a placeholder trio from the WAL tip so QC verify and TrioAt(initRoad)
-	// succeed.
-	// TODO: in the future this information will be read from disk and verified
-	// (snapshots / state sync); until then derive the tip from the CommitQC WAL.
+	// Seed {N-2..N+1} around the WAL tip for QC verify / TrioAt.
+	// Invariant: CommitQC WAL span behind that tip is within this window
+	// (pruned vs latest AppQC today). TODO: verified snapshot / state-sync.
 	loadedQCs := dataWAL.CommitQCs.ConsumeLoaded()
 	setupRoad := types.RoadIndex(0)
 	if n := len(loadedQCs); n > 0 {
 		setupRoad = loadedQCs[n-1].QC().Proposal().Index() + 1
 	}
 	cfg.Registry.SetupInitialTrio(setupRoad)
-	// SetupInitialTrio seeds only {N-2..N+1} around the tip. The EpochAt loop
-	// below therefore assumes the loaded CommitQC WAL never spans more than ~3
-	// epochs behind that tip. Today that holds because the WAL is pruned against
-	// the latest AppQC (lag << EpochLength); if retention ever grows, seed from
-	// the earliest loaded QC's epoch as well (or fail closed here).
 	// Restore QCs. insertQC handles partially pruned QCs (range starts
 	// before inner.first) by skipping the pruned prefix.
 	for _, qc := range loadedQCs {
@@ -365,10 +358,7 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 	initRoad := types.RoadIndex(0)
 	if inner.nextQC > 0 {
 		if lastQC := inner.qcs[inner.nextQC-1]; lastQC != nil {
-			// Use Index+1 to mirror the live PushQC boundary-advance: when the last
-			// committed QC is the final road of epoch N, TrioAt(N.Last) returns
-			// Current=ep(N), but TrioAt(N.Last+1) correctly returns Current=ep(N+1),
-			// matching the epochTrio the live path stored before the crash.
+			// Tipcut road (Index+1): matches live PushQC after a boundary store.
 			initRoad = lastQC.QC().Proposal().Index() + 1
 		}
 	}
@@ -389,19 +379,14 @@ func NewState(cfg *Config, dataWAL *DataWAL) (*State, error) {
 // Registry returns the epoch registry.
 func (s *State) Registry() *epoch.Registry { return s.cfg.Registry }
 
-// EpochTrio returns a snapshot of the current epoch window. Returned by value
-// so callers (e.g. EvmProxy) get an immutable point-in-time view; they must
-// call again to observe a boundary advance rather than caching the result.
+// EpochTrio is a point-in-time snapshot; re-call after a boundary advance.
 func (s *State) EpochTrio() types.EpochTrio { return s.epochTrio.Load() }
 
 // PushQC pushes FullCommitQC and a subset of blocks that were finalized by it.
 // Pushing the qc and blocks is atomic, so that no unnecessary GetBlock RPCs are issued.
 // Even if the qc was already pushed earlier, the blocks are pushed anyway.
 func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*types.Block) error {
-	// inner.epochTrio is updated under the lock at epoch boundaries.
-	// EpochForRoad searches the Prev/Current/Next window. A QC more than one
-	// epoch behind Current has its blocks below the prune cursor and would be
-	// a no-op even if accepted, so erroring out here is correct.
+	// Out-of-window ⇒ below prune tip; reject.
 	ep, err := s.epochTrio.Load().EpochForRoad(qc.QC().Proposal().Index())
 	if err != nil {
 		return err
@@ -427,10 +412,7 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 			return fmt.Errorf("qc.Verify(): %w", err)
 		}
 	}
-	// blocks is the subset of blocks finalized by this QC, so they all belong
-	// to the same epoch as the QC. Using ep here is intentional and asymmetric
-	// with PushBlock, which resolves the committee from the stored QC at each
-	// block's position rather than from the incoming QC.
+	// Blocks share the QC's epoch (unlike PushBlock, which uses the stored QC).
 	byHash := map[types.BlockHeaderHash]*types.Block{}
 	committee := ep.Committee()
 	for _, b := range blocks {
@@ -439,13 +421,8 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 			return fmt.Errorf("b.Verify(): %w", err)
 		}
 	}
-	// If this QC closes the current epoch, resolve the next trio before taking
-	// the lock and before mutating nextQC — mirroring avail.PushCommitQC. The
-	// fast path is a plain TrioAt; only if N+2 hasn't been seeded yet do we block
-	// on WaitForEpoch (off the lock) until execution seeds it, then retry.
-	// Resolving it up front means a lookup failure can never leave nextQC
-	// advanced past a boundary we didn't finish, which would strand epochTrio at
-	// the old epoch (the boundary block runs only when needQC, i.e. once).
+	// Boundary: resolve next trio off-lock before mutating nextQC
+	// (TrioAt, else WaitForEpoch(N+2)), so a failed wait cannot strand the tip.
 	idx := qc.QC().Proposal().Index()
 	var nextTrio *types.EpochTrio
 	trio := s.epochTrio.Load()
@@ -465,12 +442,8 @@ func (s *State) PushQC(ctx context.Context, qc *types.FullCommitQC, blocks []*ty
 	// Atomically insert QC and blocks.
 	for inner, ctrl := range s.inner.Lock() {
 		if needQC {
-			// needQC was computed under an earlier lock; re-check whether this
-			// call is actually the one inserting the QC range. A concurrent
-			// caller (multiple peer streams call PushQC) may have already applied
-			// it, in which case the loop below no-ops — and we must NOT store the
-			// trio, or a stale caller could regress epochTrio to an older epoch
-			// after another advanced it. Mirrors avail's commitQCs.next re-check.
+			// Re-check under lock: only the inserter may store nextTrio
+			// (stale concurrent PushQC must not regress the window).
 			applied := inner.nextQC == gr.First
 			for inner.nextQC < gr.Next {
 				inner.qcs[inner.nextQC] = qc

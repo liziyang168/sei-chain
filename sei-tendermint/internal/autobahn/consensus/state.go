@@ -169,15 +169,9 @@ func (s *State) PushTimeoutQC(ctx context.Context, qc *types.TimeoutQC) error {
 
 // PushPrepareVote processes an unverified Prepare vote message.
 func (s *State) PushPrepareVote(vote *types.Signed[*types.PrepareVote]) error {
-	// Resolve the committee from the vote's own epoch. innerRecv holds the
-	// authoritative current epoch (rotated synchronously by pushCommitQC); a vote
-	// for any other epoch is stale or premature, so drop it and move on rather
-	// than verifying it against the wrong committee (which would fail and tear
-	// down the peer's consensus stream). There is no redelivery of the dropped
-	// vote: sendUpdates only re-sends when the sender's latest vote changes. A
-	// lagging node that misses votes around the boundary recovers via the
-	// timeout path (new view → fresh votes), at the cost of one added view
-	// timeout of latency.
+	// Contract: accept only Current-epoch votes (innerRecv). Others drop without
+	// error (avoid wrong-committee verify / peer teardown). No redelivery —
+	// lagging peers recover via view timeout.
 	i := s.innerRecv.Load()
 	if voteEp := vote.Msg().Proposal().View().EpochIndex; voteEp != i.epoch.EpochIndex() {
 		logger.Debug("dropping prepare vote for non-current epoch",
@@ -196,8 +190,7 @@ func (s *State) PushPrepareVote(vote *types.Signed[*types.PrepareVote]) error {
 
 // PushCommitVote processes an unverified CommitVote message.
 func (s *State) PushCommitVote(vote *types.Signed[*types.CommitVote]) error {
-	// See PushPrepareVote: drop non-current-epoch votes; recovery is via timeout,
-	// not redelivery.
+	// Same Current-epoch contract as PushPrepareVote.
 	i := s.innerRecv.Load()
 	if voteEp := vote.Msg().Proposal().View().EpochIndex; voteEp != i.epoch.EpochIndex() {
 		logger.Debug("dropping commit vote for non-current epoch",
@@ -216,8 +209,7 @@ func (s *State) PushCommitVote(vote *types.Signed[*types.CommitVote]) error {
 
 // PushTimeoutVote processes an unverified FullTimeoutVote message.
 func (s *State) PushTimeoutVote(vote *types.FullTimeoutVote) error {
-	// See PushPrepareVote: drop non-current-epoch votes; recovery is via timeout,
-	// not redelivery.
+	// Same Current-epoch contract as PushPrepareVote.
 	i := s.innerRecv.Load()
 	if voteEp := vote.View().EpochIndex; voteEp != i.epoch.EpochIndex() {
 		logger.Debug("dropping timeout vote for non-current epoch",
