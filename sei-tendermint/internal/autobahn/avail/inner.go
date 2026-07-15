@@ -153,17 +153,9 @@ func newInner(startEpochTrio types.EpochTrio, loaded utils.Option[*loadedAvailSt
 	return i, nil
 }
 
-// laneQC returns a LaneQC for (lane, n) under ep's committee and vote set.
-func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) (*types.LaneQC, bool) {
-	c := ep.Committee()
-	quorum := c.LaneQuorum()
-	epIdx := ep.EpochIndex()
-	for _, byEpoch := range i.votes[lane].q[n].byHash {
-		if set, ok := byEpoch[epIdx]; ok && set.weight >= quorum {
-			return types.NewLaneQC(set.votes), true
-		}
-	}
-	return nil, false
+// laneQC returns a stored LaneQC for (lane, n) under ep, if any.
+func (i *inner) laneQC(lane types.LaneID, n types.BlockNumber, ep *types.Epoch) utils.Option[*types.LaneQC] {
+	return i.votes[lane].q[n].laneQC(ep)
 }
 
 // advanceEpochLanes ensures Current∪Next lanes exist and backfills Next's

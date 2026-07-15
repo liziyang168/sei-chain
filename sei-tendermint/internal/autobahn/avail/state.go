@@ -549,7 +549,7 @@ func (s *State) PushVote(ctx context.Context, vote *types.Signed[*types.LaneVote
 		// Credit under a fresh trio load. Safe if the window advanced since
 		// VerifyInWindow: weight is re-derived per epoch; trio only moves forward.
 		trio := s.epochTrio.Load()
-		if q.q[h.BlockNumber()].pushVote([]*types.Epoch{trio.Current, trio.Next}, vote) {
+		if q.q[h.BlockNumber()].pushVote([]*types.Epoch{trio.Current, trio.Next}, vote).IsPresent() {
 			ctrl.Updated()
 		}
 	}
@@ -648,7 +648,7 @@ func (s *State) WaitForLaneQCs(
 			for lane := range ep.Committee().Lanes().All() {
 				first := types.LaneRangeOpt(prev, lane).Next()
 				for i := range types.BlockNumber(types.MaxLaneRangeInProposal) {
-					if qc, ok := inner.laneQC(lane, first+i, ep); ok {
+					if qc, ok := inner.laneQC(lane, first+i, ep).Get(); ok {
 						laneQCs[lane] = qc
 					} else {
 						break
