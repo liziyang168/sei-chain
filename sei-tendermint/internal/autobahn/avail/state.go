@@ -401,7 +401,10 @@ func (s *State) PushAppQC(appQC *types.AppQC, commitQC *types.CommitQC) error {
 	}
 	ep, err := s.epochTrio.Load().EpochForRoad(commitQC.Proposal().Index())
 	if err != nil {
-		return fmt.Errorf("EpochForRoad(%d): %w", commitQC.Proposal().Index(), err)
+		// Out-of-window ⇒ stale; drop (do not tear down the peer).
+		logger.Info("dropping stale AppQC: road outside epoch window",
+			slog.Uint64("road", uint64(commitQC.Proposal().Index())), "err", err)
+		return nil
 	}
 	if err := appQC.Verify(ep.Committee()); err != nil {
 		return fmt.Errorf("appQC.Verify(): %w", err)

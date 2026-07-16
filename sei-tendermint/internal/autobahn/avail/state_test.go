@@ -857,6 +857,37 @@ func TestWaitForLaneQCs_OnlyReturnsCommitteeLanes(t *testing.T) {
 	}))
 }
 
+func TestPushAppQCOutsideWindowDrops(t *testing.T) {
+	rng := utils.TestRng()
+	registry, keys := epoch.GenRegistryAt(rng, 4, 0)
+	ep0 := utils.OrPanic1(registry.EpochAt(0))
+
+	ds := utils.OrPanic1(data.NewState(&data.Config{Registry: registry},
+		utils.OrPanic1(data.NewDataWAL(utils.None[string](), registry.FirstBlock()))))
+	state, err := NewState(keys[0], ds, utils.None[string]())
+	require.NoError(t, err)
+
+	lane := keys[0].Public()
+	block := types.NewBlock(lane, 0, types.BlockHeaderHash{}, types.GenPayload(rng))
+	qc0 := makeCommitQC(ep0, keys, utils.None[*types.CommitQC](),
+		map[types.LaneID]*types.LaneQC{lane: types.NewLaneQC(makeLaneVotes(keys, block.Header()))},
+		utils.None[*types.AppQC]())
+	appQC := types.NewAppQC(makeAppVotes(keys, types.NewAppProposal(
+		qc0.GlobalRange().First, qc0.Index(), types.GenAppHash(rng), ep0.EpochIndex())))
+
+	// Center the operating window on epoch 2 so road 0 is outside Prev|Current|Next.
+	for _, road := range []types.RoadIndex{0, epoch.EpochLength, 2 * epoch.EpochLength} {
+		registry.AdvanceIfNeeded(road)
+	}
+	farTrio := utils.OrPanic1(registry.TrioAt(2 * epoch.EpochLength))
+	for inner := range state.inner.Lock() {
+		inner.epochTrio.Store(farTrio)
+	}
+
+	require.NoError(t, state.PushAppQC(appQC, qc0))
+	require.False(t, state.LastAppQC().IsPresent())
+}
+
 // TestPushAppQCPreviousEpoch verifies that an AppQC whose road index falls in
 // epoch N-1 is accepted when the registry is seeded at epoch N. This exercises
 // the path where a late AppQC arrives after an epoch boundary has been crossed.
