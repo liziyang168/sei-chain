@@ -377,6 +377,46 @@ func TestStateMismatchedQCs(t *testing.T) {
 	})
 }
 
+func TestWaitForAppQCEpoch(t *testing.T) {
+	ctx := t.Context()
+	rng := utils.TestRng()
+	registry, keys := epoch.GenRegistryAt(rng, 4, 0)
+	ep0 := utils.OrPanic1(registry.EpochAt(0))
+	committee := ep0.Committee()
+
+	ds := utils.OrPanic1(data.NewState(&data.Config{Registry: registry}, utils.OrPanic1(data.NewDataWAL(utils.None[string](), registry.FirstBlock()))))
+	state, err := NewState(keys[0], ds, utils.None[string]())
+	require.NoError(t, err)
+
+	timeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, state.waitForAppQCEpoch(timeout, 0), context.DeadlineExceeded)
+
+	lane := keys[0].Public()
+	b, err := state.ProduceLocalBlock(state.NextBlock(lane), types.GenPayload(rng))
+	require.NoError(t, err)
+	laneQC := types.NewLaneQC(makeLaneVotes(
+		types.TestKeysWithWeight(committee, keys, committee.LaneQuorum()),
+		b.Msg().Block().Header(),
+	))
+	qc0 := makeCommitQC(ep0, keys, utils.None[*types.CommitQC](),
+		map[types.LaneID]*types.LaneQC{lane: laneQC}, utils.None[*types.AppQC]())
+	require.NoError(t, state.PushCommitQC(ctx, qc0))
+
+	appQC := types.NewAppQC(makeAppVotes(keys, types.NewAppProposal(
+		qc0.GlobalRange().Next-1, 0, types.GenAppHash(rng), 0)))
+
+	done := make(chan error, 1)
+	go func() { done <- state.waitForAppQCEpoch(ctx, 0) }()
+	require.NoError(t, state.PushAppQC(appQC, qc0))
+	require.NoError(t, <-done)
+	require.NoError(t, state.waitForAppQCEpoch(ctx, 0))
+
+	timeout2, cancel2 := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel2()
+	require.ErrorIs(t, state.waitForAppQCEpoch(timeout2, 1), context.DeadlineExceeded)
+}
+
 func TestPushBlockRejectsBadParentHash(t *testing.T) {
 	ctx := t.Context()
 	rng := utils.TestRng()

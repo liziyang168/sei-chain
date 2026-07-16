@@ -221,6 +221,32 @@ func (s *State) waitForCommitQC(ctx context.Context, idx types.RoadIndex) error 
 	return err
 }
 
+// waitForAppQCEpoch blocks until latest AppQC is from epochIdx or later.
+func (s *State) waitForAppQCEpoch(ctx context.Context, epochIdx types.EpochIndex) error {
+	for inner, ctrl := range s.inner.Lock() {
+		ready := func() bool {
+			appQC, ok := inner.latestAppQC.Get()
+			if !ok {
+				return false
+			}
+			return appQC.Proposal().EpochIndex() >= epochIdx
+		}
+		if ready() {
+			return nil
+		}
+		attrs := []any{slog.Uint64("want_epoch", uint64(epochIdx))}
+		if appQC, ok := inner.latestAppQC.Get(); ok {
+			attrs = append(attrs,
+				slog.Uint64("latest_app_qc_road", uint64(appQC.Proposal().RoadIndex())),
+				slog.Uint64("latest_app_qc_epoch", uint64(appQC.Proposal().EpochIndex())),
+			)
+		}
+		logger.Warn("waiting for AppQC before accepting CommitQC from next epoch", attrs...)
+		return ctrl.WaitUntil(ctx, ready)
+	}
+	panic("unreachable")
+}
+
 // LastAppQC returns the latest observed AppQC.
 func (s *State) LastAppQC() utils.Option[*types.AppQC] {
 	for inner := range s.inner.Lock() {
@@ -263,11 +289,17 @@ func (s *State) CommitQC(ctx context.Context, idx types.RoadIndex) (*types.Commi
 }
 
 // PushCommitQC pushes a CommitQC to the state.
-// Waits until all previous CommitQCs are pushed.
+// Waits for prior CommitQCs, and for AppQC of epoch N before accepting a
+// CommitQC from N+1 (avail tip at most one epoch ahead of the AppQC anchor).
 func (s *State) PushCommitQC(ctx context.Context, qc *types.CommitQC) error {
 	idx := qc.Proposal().Index()
 	if idx > 0 {
 		if err := s.waitForCommitQC(ctx, idx-1); err != nil {
+			return err
+		}
+	}
+	if qcEpoch := qc.Proposal().EpochIndex(); qcEpoch > 0 {
+		if err := s.waitForAppQCEpoch(ctx, qcEpoch-1); err != nil {
 			return err
 		}
 	}
